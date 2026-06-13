@@ -3,6 +3,18 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
+
+# Support Colab-style execution:
+# exec(open('/content/Siemens-Sea/run_pipeline.py').read())
+if "__file__" in globals():
+    _SCRIPT_DIR = Path(__file__).resolve().parent
+else:
+    _colab_project_dir = Path("/content/Siemens-Sea")
+    _SCRIPT_DIR = _colab_project_dir if _colab_project_dir.exists() else Path.cwd()
+
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
 
 from config import IMPLEMENTED_FLOWS
 from extractor import save_selections_to_excel
