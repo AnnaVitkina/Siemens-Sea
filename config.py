@@ -27,7 +27,7 @@ BCN_POD_COLUMN = "POD+Alternative Destination Terminal"
 PROJECT_ROOT = Path(__file__).resolve().parent
 COLAB_SHARED_DRIVE_ROOT = Path(
     "/content/drive/Shareddrives/FA Ops Europe: Rate Maintenance Team "
-    "/Documents/AI Adoption RMT/RMT Siemens/Siemens Air"
+    "/Documents/AI Adoption RMT/RMT Siemens/Siemens Sea"
 )
 
 
