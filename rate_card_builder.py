@@ -1041,7 +1041,8 @@ def _prune_empty_cost_groups(
 def build_output_rate_card_path(flow: str, shipper: str) -> Path:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     shipper_slug = slugify(shipper)
-    return OUTPUT_DIR / f"{flow}_{shipper_slug}_rate_card.xlsx"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return OUTPUT_DIR / f"{flow}_{shipper_slug}_rate_card_{timestamp}.xlsx"
 
 
 def save_rate_card(
