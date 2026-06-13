@@ -108,4 +108,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    exit_code = main()
+    # In notebooks/exec(), avoid raising SystemExit noise.
+    if "__file__" in globals():
+        sys.exit(exit_code)
