@@ -846,9 +846,10 @@ def build_output_rate_card_path(
 ) -> Path:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     shipper_slug = slugify(shipper)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     if carrier_slug:
-        return OUTPUT_DIR / f"{flow}_{shipper_slug}_{carrier_slug}_rate_card.xlsx"
-    return OUTPUT_DIR / f"{flow}_{shipper_slug}_rate_card.xlsx"
+        return OUTPUT_DIR / f"{flow}_{shipper_slug}_{carrier_slug}_rate_card_{timestamp}.xlsx"
+    return OUTPUT_DIR / f"{flow}_{shipper_slug}_rate_card_{timestamp}.xlsx"
 
 
 def save_lcl_rate_card(
