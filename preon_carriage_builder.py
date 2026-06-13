@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 import re
 
@@ -862,9 +863,10 @@ def resolve_preon_carrier_slug(
 def build_output_rate_card_path(flow: str, shipper: str, carrier_slug: str | None = None) -> Path:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     shipper_slug = slugify(shipper)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     if carrier_slug:
-        return OUTPUT_DIR / f"{flow}_{shipper_slug}_{carrier_slug}_rate_card.xlsx"
-    return OUTPUT_DIR / f"{flow}_{shipper_slug}_rate_card.xlsx"
+        return OUTPUT_DIR / f"{flow}_{shipper_slug}_{carrier_slug}_rate_card_{timestamp}.xlsx"
+    return OUTPUT_DIR / f"{flow}_{shipper_slug}_rate_card_{timestamp}.xlsx"
 
 
 def save_preon_per_carrier_rate_card(
