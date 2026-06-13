@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -307,7 +308,8 @@ def _write_innomotics_sheet(workbook: Workbook, df: pd.DataFrame, groups: list[C
 
 def build_output_rate_card_path(flow: str, shipper: str) -> Path:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    return OUTPUT_DIR / f"{slugify(flow)}_{slugify(shipper)}_rate_card.xlsx"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return OUTPUT_DIR / f"{slugify(flow)}_{slugify(shipper)}_rate_card_{timestamp}.xlsx"
 
 
 def _resolve_innomotics_carrier_slug(selections: list[SubfolderSelection]) -> str:
@@ -329,8 +331,9 @@ def save_innomotics_rate_card(
     rate_card_df, groups = build_innomotics_rate_card_dataframe(selections)
     if output_path is None:
         carrier_slug = _resolve_innomotics_carrier_slug(selections)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_path = OUTPUT_DIR / (
-            f"{slugify('Innomotics')}_{slugify(shipper)}_{slugify(carrier_slug)}_rate_card.xlsx"
+            f"{slugify('Innomotics')}_{slugify(shipper)}_{slugify(carrier_slug)}_rate_card_{timestamp}.xlsx"
         )
     workbook = Workbook()
     _write_innomotics_sheet(workbook, rate_card_df, groups)
