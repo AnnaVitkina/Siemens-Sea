@@ -129,8 +129,10 @@ def load_fcl_thc_lookup(
     source_file: Path | None = None,
 ) -> FclThcLookup:
     if processing_path and processing_path.exists():
-        df = pd.read_excel(processing_path, sheet_name=FCL_THC_BASE_TAB)
-        return FclThcLookup.from_dataframe(df)
+        sheet_names = pd.ExcelFile(processing_path).sheet_names
+        if FCL_THC_BASE_TAB in sheet_names:
+            df = pd.read_excel(processing_path, sheet_name=FCL_THC_BASE_TAB)
+            return FclThcLookup.from_dataframe(df)
 
     if source_file and source_file.exists():
         df = extract_sheet_to_dataframe(source_file, FCL_THC_BASE_TAB)
