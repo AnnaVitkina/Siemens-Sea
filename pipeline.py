@@ -28,6 +28,20 @@ from rate_card_builder import (
 from rates_surcharge_lookup import RatesSurchargeLookup, load_rates_surcharge_lookup
 from thc_lookup import FclThcLookup, load_fcl_thc_lookup
 
+HEALTHINEERS_SHIPPERS = frozenset({"Siemens Healthineers", "Siemens Healthineers LATAM"})
+HEALTHINEERS_MAIN_RATES_FLOWS = frozenset({"FCL", "BCN"})
+
+
+def _healthineers_main_rates_optional_supplements(shipper: str, flow: str) -> bool:
+    return shipper in HEALTHINEERS_SHIPPERS and flow in HEALTHINEERS_MAIN_RATES_FLOWS
+
+
+def _load_thc_lookup_if_available(processing_path: Path) -> FclThcLookup:
+    try:
+        return load_fcl_thc_lookup(processing_path=processing_path)
+    except (FileNotFoundError, KeyError, ValueError):
+        return FclThcLookup({})
+
 
 @dataclass
 class CarrierSummary:
@@ -91,12 +105,12 @@ def validate_rate_card_selections(
     selected = _selected_tabs(shared)
     errors: list[str] = []
     required_tabs = RATE_CARD_REQUIRED_TABS_BY_FLOW[flow]
-    if shipper == "Siemens Healthineers LATAM" and flow == "FCL":
+    if _healthineers_main_rates_optional_supplements(shipper, flow):
         required_tabs = tuple(tab for tab in required_tabs if tab != "FCL_THC")
     for tab in required_tabs:
         if tab not in selected:
             errors.append(f"Missing required tab: {tab}")
-    if not individual and shipper != "Siemens Healthineers LATAM":
+    if not individual and not _healthineers_main_rates_optional_supplements(shipper, flow):
         errors.append("At least one individual rate file must be selected.")
     for selection in individual:
         carrier_key = detect_carrier_key(
@@ -304,11 +318,11 @@ def run_rate_card_build(
         return rate_card_path, rate_card_df
 
     source_df = load_digi_fcl_rates_dataframe(processing_path=processing_path)
-    if flow == "FCL" and shipper == "Siemens Healthineers LATAM":
-        thc_lookup = FclThcLookup({})
+    if _healthineers_main_rates_optional_supplements(shipper, flow):
+        thc_lookup = _load_thc_lookup_if_available(processing_path)
     else:
         thc_lookup = load_fcl_thc_lookup(processing_path=processing_path)
-    if flow == "FCL" and shipper == "Siemens Healthineers LATAM":
+    if shipper == "Siemens Healthineers LATAM" and flow == "FCL":
         try:
             surcharge_lookup = load_rates_surcharge_lookup(processing_path=processing_path, strict=False)
         except FileNotFoundError:
