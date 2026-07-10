@@ -111,6 +111,11 @@ def _read_excel_engine(file_path: Path) -> str | None:
 
 
 def extract_sheet_to_dataframe(file_path: Path, sheet_name: str) -> pd.DataFrame:
+    from lcl_rate_card_builder import is_lcl_rates_tab, read_lcl_rates_tab_dataframe
+
+    if is_lcl_rates_tab(sheet_name):
+        return read_lcl_rates_tab_dataframe(file_path, sheet_name)
+
     header_row = resolve_sheet_header_row(sheet_name)
     engine = _read_excel_engine(file_path)
 
