@@ -121,7 +121,7 @@ class ParsedLclRow:
 
 def is_lcl_rates_tab(tab_name: str) -> bool:
     normalized = re.sub(r"[\s_]+", "", tab_name.lower())
-    return "lclrates" in normalized or "ltlrates" in normalized
+    return "lclrate" in normalized or "ltlrate" in normalized
 
 
 def resolve_lcl_rates_tabs(file_path: Path) -> list[str]:
@@ -137,6 +137,44 @@ def resolve_lcl_tabs(file_path: Path) -> list[str]:
 
 def normalize_column_name(name: object) -> str:
     return re.sub(r"\s+", " ", str(name).replace("\n", " ")).strip()
+
+
+def _detect_lcl_rates_header_row(raw_df: pd.DataFrame) -> int:
+    for idx in range(min(30, len(raw_df))):
+        row_values = {
+            normalize_column_name(value).lower()
+            for value in raw_df.iloc[idx].tolist()
+            if pd.notna(value) and str(value).strip()
+        }
+        if "cost type" in row_values and (
+            "origin cfs code" in row_values
+            or "lane id" in row_values
+            or "origin country" in row_values
+        ):
+            return idx
+    return 0
+
+
+def _read_excel_engine(file_path: Path) -> str | None:
+    if file_path.suffix.lower() == ".xlsb":
+        return "pyxlsb"
+    return None
+
+
+def read_lcl_rates_tab_dataframe(file_path: Path, tab_name: str) -> pd.DataFrame:
+    engine = _read_excel_engine(file_path)
+    raw = pd.read_excel(file_path, sheet_name=tab_name, header=None, engine=engine)
+    header_row = _detect_lcl_rates_header_row(raw)
+    df = pd.read_excel(file_path, sheet_name=tab_name, header=header_row, engine=engine)
+    df = normalize_dataframe_columns(df)
+    return df.dropna(axis=1, how="all").dropna(axis=0, how="all")
+
+
+def _find_cost_type_column(df: pd.DataFrame) -> str | None:
+    for column in df.columns:
+        if normalize_column_name(column).lower() == "cost type":
+            return column
+    return None
 
 
 def normalize_dataframe_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -320,7 +358,8 @@ def _resolve_cost_value(
 
 
 def _parse_lcl_rows_from_tab(tab_name: str, df: pd.DataFrame) -> tuple[list[ParsedLclRow], list[str]]:
-    if "Cost type" not in df.columns:
+    cost_type_column = _find_cost_type_column(df)
+    if cost_type_column is None:
         return [], ["Tab Name"]
 
     pre_cost_columns = _columns_before_cost_type(df)
@@ -335,7 +374,7 @@ def _parse_lcl_rows_from_tab(tab_name: str, df: pd.DataFrame) -> tuple[list[Pars
     surcharge_by_key: dict[tuple, dict[str, object]] = {}
 
     for _, row in df.iterrows():
-        cost_kind = _normalize_cost_type(row.get("Cost type"))
+        cost_kind = _normalize_cost_type(row.get(cost_type_column))
         if cost_kind != "transport":
             continue
 
@@ -354,7 +393,7 @@ def _parse_lcl_rows_from_tab(tab_name: str, df: pd.DataFrame) -> tuple[list[Pars
         }
 
     for _, row in df.iterrows():
-        cost_kind = _normalize_cost_type(row.get("Cost type"))
+        cost_kind = _normalize_cost_type(row.get(cost_type_column))
         if cost_kind is None:
             continue
 
@@ -395,7 +434,7 @@ def load_lcl_parsed_rows(selections: list[SubfolderSelection]) -> tuple[list[Par
         for tab in selection.tabs:
             if not is_lcl_rates_tab(tab):
                 continue
-            df = normalize_dataframe_columns(extract_sheet_to_dataframe(selection.file_path, tab))
+            df = read_lcl_rates_tab_dataframe(selection.file_path, tab)
             tab_rows, tab_shipment_columns = _parse_lcl_rows_from_tab(tab, df)
             parsed_rows.extend(tab_rows)
             if shipment_columns is None:
@@ -425,7 +464,11 @@ def load_lcl_parsed_rows_from_processing(
             sheet_name = _find_processing_sheet_name(workbook.sheet_names, tab)
             if sheet_name is None:
                 continue
-            df = normalize_dataframe_columns(pd.read_excel(processing_path, sheet_name=sheet_name))
+            raw = pd.read_excel(processing_path, sheet_name=sheet_name, header=None)
+            header_row = _detect_lcl_rates_header_row(raw)
+            df = normalize_dataframe_columns(
+                pd.read_excel(processing_path, sheet_name=sheet_name, header=header_row)
+            )
             tab_rows, tab_shipment_columns = _parse_lcl_rows_from_tab(tab, df)
             parsed_rows.extend(tab_rows)
             if shipment_columns is None:
@@ -863,11 +906,13 @@ def save_lcl_rate_card(
             processing_path,
             individual_selections,
         )
+        if not parsed_rows:
+            parsed_rows, shipment_columns = load_lcl_parsed_rows(individual_selections)
     else:
         parsed_rows, shipment_columns = load_lcl_parsed_rows(individual_selections)
 
     if not parsed_rows:
-        raise ValueError("No LCL_Rates rows found in selected individual rate files.")
+        raise ValueError("No LCL Rate/LCL_Rates rows found in selected individual rate files.")
 
     rate_card_df, column_groups, shipment_columns = build_lcl_rate_card_dataframe(
         parsed_rows,
