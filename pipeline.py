@@ -17,6 +17,7 @@ from lcl_rate_card_builder import (
 )
 from preon_carriage_builder import save_preon_generic_rate_card, save_preon_per_carrier_rate_card
 from preon_carriage_builder import (
+    PREON_DIESELFLOATER_TAB,
     build_output_rate_card_path as build_preon_output_rate_card_path,
     resolve_preon_carrier_slug,
 )
@@ -167,7 +168,7 @@ def _validate_preon_selections(
         errors.append("At least one individual rate file must be selected for Pre/on carriage.")
         return errors
 
-    required_tabs = {"Pre-On-Carriage_RoW", "Glossary", "Emergency Dieselfloater Pre_On"}
+    required_tabs = {"Pre-On-Carriage_RoW", "Glossary"}
     for selection in individual:
         missing = required_tabs.difference(selection.tabs)
         if missing:
@@ -215,13 +216,13 @@ def _validate_lcl_selections(selections: list[SubfolderSelection]) -> list[str]:
         lcl_tabs = [tab for tab in selection.tabs if is_lcl_rates_tab(tab)]
         if not lcl_tabs:
             errors.append(
-                f"No LCL_Rates tab selected for individual rate file: {selection.file_path.name}"
+                f"No LCL Rate/LCL_Rates tab selected for individual rate file: {selection.file_path.name}"
             )
         else:
             has_lcl_rates_tab = True
 
     if not has_lcl_rates_tab:
-        errors.append("At least one tab containing LCL_Rates must be selected.")
+        errors.append("At least one tab containing LCL Rate or LCL_Rates must be selected.")
     return errors
 
 
@@ -241,6 +242,15 @@ def warn_rate_card_selections(
 
     warnings: list[str] = []
     _, individual = split_selections(selections)
+    if flow == "Pre/on carriage":
+        for selection in individual:
+            if PREON_DIESELFLOATER_TAB not in selection.tabs:
+                warnings.append(
+                    f"Tab '{PREON_DIESELFLOATER_TAB}' not selected for {selection.file_path.name} — "
+                    "Emergency Fuel Surcharge accessorial will be omitted."
+                )
+        return warnings
+
     for selection in individual:
         if GLOSSARY_TAB not in selection.tabs:
             warnings.append(
@@ -414,6 +424,21 @@ def run_pipeline(
             individual_selections=individual_selections,
             output_path=build_lcl_output_rate_card_path(flow, shipper, carrier_slug),
         )
+        glossary_lookups = load_glossary_fee_lookups(
+            shipper,
+            individual_selections,
+            flow=flow,
+        )
+        return PipelineResult(
+            shipper=shipper,
+            flow=flow,
+            processing_path=context.output_path,
+            rate_card_path=rate_card_path,
+            source_rows=len(rate_card_df),
+            rate_card_rows=len(rate_card_df),
+            rate_card_columns=len(rate_card_df.columns),
+            carriers=_carrier_summaries(flow, shipper, individual_selections, glossary_lookups),
+        )
     if flow == "Pre/on carriage":
         carrier_slug = resolve_preon_carrier_slug(shipper, individual_selections)
         preon_builder_selections = (
@@ -448,16 +473,6 @@ def run_pipeline(
             flow,
             individual_selections=selections,
             output_path=build_preon_output_rate_card_path("Haulage", shipper),
-        )
-        return PipelineResult(
-            shipper=shipper,
-            flow=flow,
-            processing_path=context.output_path,
-            rate_card_path=rate_card_path,
-            source_rows=0,
-            rate_card_rows=len(rate_card_df),
-            rate_card_columns=len(rate_card_df.columns),
-            carriers=[],
         )
         return PipelineResult(
             shipper=shipper,
