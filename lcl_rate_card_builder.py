@@ -19,6 +19,7 @@ from accessorial_costs import (
     write_accessorial_costs_sheet,
 )
 from carrier_lookup import carrier_code_from_filename, detect_carrier_key
+from date_utils import format_dd_mm_yyyy
 from config import (
     CONDITIONAL_RULES_SHEET_NAME,
     GLOSSARY_TAB,
@@ -183,15 +184,7 @@ def normalize_dataframe_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _format_lcl_date(value: object) -> str | None:
-    if pd.isna(value):
-        return None
-    if isinstance(value, datetime):
-        return value.strftime("%d.%m.%Y")
-    parsed = pd.to_datetime(value, errors="coerce")
-    if pd.isna(parsed):
-        text = str(value).strip()
-        return text or None
-    return parsed.strftime("%d.%m.%Y")
+    return format_dd_mm_yyyy(value)
 
 
 def _normalize_number(value: object) -> object:
