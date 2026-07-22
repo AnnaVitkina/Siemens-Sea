@@ -17,7 +17,11 @@ if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
 from config import IMPLEMENTED_FLOWS
-from extractor import save_selections_to_excel
+from extractor import (
+    build_flow_result_output_path,
+    primary_source_file_for_output,
+    save_selections_to_excel,
+)
 from innomotics_builder import save_innomotics_rate_card
 from main import collect_selections, prompt_flow, prompt_preon_underflow, prompt_shipper
 from pipeline import (
@@ -65,7 +69,12 @@ def main() -> int:
             print("Cancelled.")
             return 0
         processing_path, _context = save_selections_to_excel(flow, shipper, selections, underflow=underflow)
-        rate_card_path, rate_card_df = save_innomotics_rate_card(shipper, selections)
+        source_file = primary_source_file_for_output(flow, selections, underflow=underflow)
+        rate_card_path, rate_card_df = save_innomotics_rate_card(
+            shipper,
+            selections,
+            output_path=build_flow_result_output_path(flow, source_file, underflow=underflow),
+        )
         print("\nPipeline complete")
         print("==================")
         print(f"  Shipper: {shipper}")
