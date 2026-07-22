@@ -21,6 +21,8 @@ from config import (
     INDIVIDUAL_RATE_SUBFOLDER,
     INPUT_DIR,
     INPUT_SUBFOLDERS,
+    INNOMOTICS_SUBFOLDER,
+    OUTPUT_DIR,
     PROCESSING_CONTEXT_FILE,
     PROCESSING_DIR,
     SHEET_HEADER_ROWS,
@@ -155,6 +157,70 @@ def sanitize_excel_sheet_name(name: str, used_names: set[str]) -> str:
 def slugify(value: str) -> str:
     slug = re.sub(r"[^A-Za-z0-9]+", "_", value).strip("_")
     return slug or "unknown"
+
+
+def _safe_source_stem(source_file: Path) -> str:
+    stem = source_file.stem
+    cleaned = re.sub(r'[<>:"/\\|?*]', "_", stem).strip()
+    return cleaned or "source"
+
+
+def flow_slug_for_output(flow: str, underflow: str | None = None) -> str:
+    parts = [slugify(flow)]
+    if underflow:
+        parts.append(slugify(underflow))
+    return "_".join(parts)
+
+
+def primary_source_file_for_output(
+    flow: str,
+    selections: list[SubfolderSelection],
+    underflow: str | None = None,
+) -> Path:
+    if not selections:
+        raise ValueError("No input file selections available for output naming.")
+
+    if flow == "LCL":
+        for selection in selections:
+            if selection.subfolder == INDIVIDUAL_RATE_SUBFOLDER:
+                return selection.file_path
+
+    if flow == "Pre/on carriage":
+        if underflow == "generic":
+            for selection in selections:
+                if selection.subfolder == "main rates":
+                    return selection.file_path
+        for selection in selections:
+            if selection.subfolder == INDIVIDUAL_RATE_SUBFOLDER:
+                return selection.file_path
+
+    if flow == "Haulage":
+        for selection in selections:
+            if selection.subfolder == "main rates":
+                return selection.file_path
+
+    if flow == "Innomotics":
+        for selection in selections:
+            if selection.subfolder == INNOMOTICS_SUBFOLDER:
+                return selection.file_path
+
+    for selection in selections:
+        if selection.subfolder == "main rates":
+            return selection.file_path
+
+    return selections[0].file_path
+
+
+def build_flow_result_output_path(
+    flow: str,
+    source_file: Path,
+    underflow: str | None = None,
+) -> Path:
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    flow_part = flow_slug_for_output(flow, underflow=underflow)
+    source_part = _safe_source_stem(source_file)
+    return OUTPUT_DIR / f"{source_part}_{flow_part}_result_{timestamp}.xlsx"
 
 
 def build_output_path(flow: str, shipper: str) -> Path:
