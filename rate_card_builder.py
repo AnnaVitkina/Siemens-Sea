@@ -20,6 +20,7 @@ from carrier_lookup import (
 )
 from accessorial_costs import ACCESSORIAL_COLUMNS, build_accessorial_costs_dataframe, write_accessorial_costs_sheet
 from cleaning import clean_digi_fcl_rates
+from date_utils import format_dd_mm_yyyy
 from config import (
     BCN_EQUIPMENT_TYPE_VALUE,
     BCN_MULTIPLIER_LABEL,
@@ -153,16 +154,7 @@ def _split_port_code(port_code: object) -> tuple[str | None, str | None]:
 
 
 def _format_date(value: object) -> str | None:
-    if pd.isna(value):
-        return None
-
-    if isinstance(value, datetime):
-        return value.strftime("%d.%m.%Y")
-
-    parsed = pd.to_datetime(value, errors="coerce")
-    if pd.isna(parsed):
-        return str(value)
-    return parsed.strftime("%d.%m.%Y")
+    return format_dd_mm_yyyy(value)
 
 
 def _display_container_type(container_type_code: str) -> str:
