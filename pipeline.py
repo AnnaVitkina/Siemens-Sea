@@ -8,6 +8,7 @@ from pathlib import Path
 from carrier_lookup import carrier_code_from_filename, detect_carrier_key
 from config import GLOSSARY_TAB, IMPLEMENTED_FLOWS, INDIVIDUAL_RATE_SUBFOLDER, RATE_CARD_REQUIRED_TABS_BY_FLOW
 from extractor import ProcessingContext, SubfolderSelection, save_selections_to_excel
+from extractor import build_flow_result_output_path, primary_source_file_for_output
 from glossary_lookup import GlossaryFeeLookup, load_glossary_fee_lookups
 from lcl_rate_card_builder import (
     build_output_rate_card_path as build_lcl_output_rate_card_path,
@@ -414,6 +415,8 @@ def run_pipeline(
 
     _, individual_selections = split_selections(selections)
     context = run_extraction(flow, shipper, selections, underflow=underflow)
+    source_file = primary_source_file_for_output(flow, selections, underflow=underflow)
+    result_output_path = build_flow_result_output_path(flow, source_file, underflow=underflow)
 
     if flow == "LCL":
         carrier_slug = resolve_lcl_carrier_slug(shipper, individual_selections)
@@ -422,7 +425,7 @@ def run_pipeline(
             context.output_path,
             flow,
             individual_selections=individual_selections,
-            output_path=build_lcl_output_rate_card_path(flow, shipper, carrier_slug),
+            output_path=result_output_path,
         )
         glossary_lookups = load_glossary_fee_lookups(
             shipper,
@@ -440,7 +443,6 @@ def run_pipeline(
             carriers=_carrier_summaries(flow, shipper, individual_selections, glossary_lookups),
         )
     if flow == "Pre/on carriage":
-        carrier_slug = resolve_preon_carrier_slug(shipper, individual_selections)
         preon_builder_selections = (
             selections if underflow == "generic" else individual_selections
         )
@@ -450,11 +452,7 @@ def run_pipeline(
             flow,
             underflow=underflow,
             individual_selections=preon_builder_selections,
-            output_path=build_preon_output_rate_card_path(
-                "Pre_on_carriage_generic" if underflow == "generic" else "Pre_on_carriage",
-                shipper,
-                None if underflow == "generic" else carrier_slug,
-            ),
+            output_path=result_output_path,
         )
         return PipelineResult(
             shipper=shipper,
@@ -472,7 +470,7 @@ def run_pipeline(
             context.output_path,
             flow,
             individual_selections=selections,
-            output_path=build_preon_output_rate_card_path("Haulage", shipper),
+            output_path=result_output_path,
         )
         return PipelineResult(
             shipper=shipper,
@@ -496,7 +494,7 @@ def run_pipeline(
         flow,
         glossary_lookups=glossary_lookups,
         individual_selections=individual_selections,
-        output_path=build_output_rate_card_path(flow, shipper),
+        output_path=result_output_path,
     )
 
     source_df = load_digi_fcl_rates_dataframe(processing_path=context.output_path)
