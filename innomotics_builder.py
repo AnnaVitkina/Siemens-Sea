@@ -13,6 +13,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.utils.dataframe import dataframe_to_rows
 
 from config import OUTPUT_DIR, RATE_CARD_SHEET_NAME
+from date_utils import format_dd_mm_yyyy
 from extractor import SubfolderSelection, slugify
 
 SHIPMENT_COLUMNS = [
@@ -60,12 +61,8 @@ def _normalize_number(value: object) -> object:
 
 
 def _format_date(value: object) -> str:
-    if value is None or (isinstance(value, float) and pd.isna(value)):
-        return ""
-    parsed = pd.to_datetime(value, errors="coerce")
-    if pd.isna(parsed):
-        return _normalize_text(value)
-    return parsed.strftime("%d.%m.%Y")
+    formatted = format_dd_mm_yyyy(value)
+    return formatted or ""
 
 
 def _detect_header_row(raw_df: pd.DataFrame) -> int:
