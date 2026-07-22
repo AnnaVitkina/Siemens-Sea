@@ -17,6 +17,7 @@ from accessorial_costs import apply_table_sheet_formatting
 from carrier_lookup import carrier_code_from_filename, detect_carrier_key
 from config import ACCESSORIAL_COSTS_SHEET_NAME, GLOSSARY_TAB, OUTPUT_DIR, RATE_CARD_SHEET_NAME
 from extractor import SubfolderSelection, extract_sheet_to_dataframe, slugify
+from date_utils import format_dd_mm_yyyy
 from glossary_lookup import _glossary_fee_text
 from thc_lookup import FclThcLookup, load_fcl_thc_lookup
 
@@ -126,13 +127,7 @@ def _format_number_text(value: float) -> str:
 
 
 def _format_date(value: object) -> str | None:
-    if pd.isna(value):
-        return None
-    parsed = pd.to_datetime(value, errors="coerce")
-    if pd.isna(parsed):
-        text = str(value).strip()
-        return text or None
-    return parsed.strftime("%d.%m.%Y")
+    return format_dd_mm_yyyy(value)
 
 
 def _last_three(value: object) -> str | None:
@@ -147,6 +142,12 @@ def _value_from_aliases(row: pd.Series, aliases: tuple[str, ...]) -> object:
         if alias in row.index:
             return row.get(alias)
     return None
+
+
+def _is_excluded_preon_transport_cost_type(cost_type: object) -> bool:
+    """Skip Rail/Truck charge rows in Pre/on carriage (Divisions and Healthineers)."""
+    text = re.sub(r"[\s_/]+", "", _normalize_text(cost_type).upper())
+    return text == "RAILTRUCKCHARGE"
 
 
 def _equipment_apply_if(max_weight: object, min_weight_excluded: object | None = None) -> str:
@@ -234,6 +235,8 @@ def _build_cost_groups(row: pd.Series) -> list[CostGroup]:
     type_mode = _normalize_text(row.get("Type Mode", "")).upper()
     calc_basis_type = _normalize_text(row.get("Calculation Basis Type", "")).lower()
     cost_type = _normalize_text(row.get("Cost Type"))
+    if _is_excluded_preon_transport_cost_type(cost_type):
+        return []
     sub_mode = row.get("Sub Mode")
     max_weight = _normalize_number(row.get("Maximum weight (included)"))
     min_weight = _normalize_number(row.get("Minimum weight (excluded)"))
@@ -535,9 +538,12 @@ def _build_cost_groups(row: pd.Series) -> list[CostGroup]:
 
 
 def _build_generic_transport_cost_groups(row: pd.Series) -> list[CostGroup]:
+    cost_type_raw = _normalize_text(row.get("Cost Type"))
+    if _is_excluded_preon_transport_cost_type(cost_type_raw):
+        return []
     sub_mode_raw = _normalize_text(row.get("Sub Mode")) or "UNKNOWN"
     sub_mode_normalized = _normalize_sub_mode(sub_mode_raw)
-    cost_type = _normalize_text(row.get("Cost Type")) or "Transport"
+    cost_type = cost_type_raw or "Transport"
     max_weight = _normalize_number(
         _value_from_aliases(
             row,
@@ -716,6 +722,7 @@ def _shipment_rows_from_source_row(
     row: pd.Series,
     *,
     use_dhl_divisions_mapping: bool = False,
+    shipper: str | None = None,
 ) -> list[dict[str, object]]:
     origin_country = _value_from_aliases(row, ("Origin Country", "Origin country"))
     origin_location_name = _value_from_aliases(
@@ -744,6 +751,10 @@ def _shipment_rows_from_source_row(
     if use_dhl_divisions_mapping:
         from_unlocode = origin_location
         to_location_or_port = destination_location
+        destination_city = destination_location_name
+    elif shipper == "Siemens Healthineers":
+        from_unlocode = origin_location
+        to_location_or_port = destination_location_name
         destination_city = destination_location_name
     else:
         from_unlocode = _last_three(origin_location)
@@ -802,6 +813,8 @@ def _shipment_row_from_source_row_generic(
     for col in shipment_columns:
         source_col = "Supplier" if col == "Forwarded" else col
         value = row.get(source_col)
+        if normalize_column_name(col).lower() in {"valid from", "valid to", "valid until"}:
+            value = format_dd_mm_yyyy(value)
         values[col] = value
     return values
 
@@ -897,6 +910,7 @@ def save_preon_per_carrier_rate_card(
                 for shipment in _shipment_rows_from_source_row(
                     src_row,
                     use_dhl_divisions_mapping=_use_dhl_divisions_mapping(shipper, selection),
+                    shipper=shipper,
                 ):
                     key = tuple(shipment[col] for col in SHIPMENT_COLUMNS)
                     rows_by_key.setdefault(key, shipment)
