@@ -110,6 +110,9 @@ HEALTHINEERS_CONDITIONS_FILL = PatternFill(fill_type="solid", fgColor="F8CBAD")
 LCL_TRANSPORT_P_UNIT_DIVIDE_SHIPPERS = frozenset(
     {"Siemens Healthineers", "Siemens Divisions"}
 )
+LCL_STRUCTURED_CONDITIONS_SHIPPERS = frozenset(
+    {"Siemens Healthineers", "Siemens Divisions"}
+)
 ORIGIN_CFS_COLUMN = "Origin CFS Code"
 DESTINATION_CFS_COLUMN = "Destination CFS Code"
 ALL_PORTS_VALUE = "ALL PORTS"
@@ -1171,7 +1174,7 @@ def save_lcl_rate_card(
         shipper=shipper,
         dhl_origin_port_display=dhl_file,
     )
-    if shipper == "Siemens Healthineers":
+    if shipper in LCL_STRUCTURED_CONDITIONS_SHIPPERS:
         conditional_df = build_healthineers_conditions_dataframe(
             parsed_rows,
             dhl_file=dhl_file,
@@ -1190,7 +1193,7 @@ def save_lcl_rate_card(
 
     workbook = Workbook()
     _write_rate_card_sheet(workbook, rate_card_df, column_groups, shipment_columns)
-    if shipper == "Siemens Healthineers":
+    if shipper in LCL_STRUCTURED_CONDITIONS_SHIPPERS:
         _write_healthineers_conditions_sheet(workbook, conditional_df)
     else:
         _write_conditional_rules_sheet(workbook, conditional_df)
