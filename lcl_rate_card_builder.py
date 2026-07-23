@@ -105,9 +105,20 @@ LCL_COST_GROUPS = (
 )
 
 CONDITIONAL_RULES_COLUMNS = ("Column name", "Value", "Conditional Rule")
+HEALTHINEERS_CONDITIONS_COLUMNS = ("Column name", "Name", "Operator", "Values", "Scope")
+HEALTHINEERS_CONDITIONS_FILL = PatternFill(fill_type="solid", fgColor="F8CBAD")
+LCL_TRANSPORT_P_UNIT_DIVIDE_SHIPPERS = frozenset(
+    {"Siemens Healthineers", "Siemens Divisions"}
+)
 ORIGIN_CFS_COLUMN = "Origin CFS Code"
 DESTINATION_CFS_COLUMN = "Destination CFS Code"
 ALL_PORTS_VALUE = "ALL PORTS"
+DHL_ORIGIN_PORT_GROUP = frozenset({"BRE", "BRV", "HAM"})
+DHL_ORIGIN_PORT_GROUP_LABEL = "BRE/BRV/HAM"
+DHL_ORIGIN_PORT_GROUP_VALUES = "BRE,BRV,HAM"
+DHL_ORIGIN_PORT_GROUP_RULE = (
+    f"SHIP_PORT equals {DHL_ORIGIN_PORT_GROUP_VALUES} in all items"
+)
 ALPHABET_RULE = ", ".join(f"'{letter}'" for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ")
 
 
@@ -240,11 +251,17 @@ def _find_cost_column(df: pd.DataFrame) -> str | None:
 
 
 def _find_optional_surcharge_column(df: pd.DataFrame, patterns: tuple[str, ...]) -> str | None:
+    exact_matches: list[str] = []
+    partial_matches: list[str] = []
     for column in df.columns:
         normalized = normalize_column_name(column).lower()
-        if any(pattern in normalized for pattern in patterns):
-            return column
-    return None
+        if any(normalized == pattern for pattern in patterns):
+            exact_matches.append(column)
+        elif any(pattern in normalized for pattern in patterns):
+            partial_matches.append(column)
+    if exact_matches:
+        return exact_matches[0]
+    return partial_matches[0] if partial_matches else None
 
 
 def _normalize_cost_type(value: object) -> str | None:
@@ -321,32 +338,79 @@ def _build_shipment_values(
     if valid_until_column is not None:
         values["Valid to"] = _format_lcl_date(row[valid_until_column])
 
-    return {column: values.get(column) for column in shipment_column_order}
+    result = {column: values.get(column) for column in shipment_column_order}
+    return _apply_lcl_cfs_code_trimming(result)
+
+
+def _trim_lcl_cfs_code(value: object) -> object:
+    if pd.isna(value):
+        return value
+    text = str(value).strip()
+    if not text:
+        return value
+    normalized = text.upper()
+    if normalized == ALL_PORTS_VALUE or normalized.startswith("ALL-"):
+        return text
+    if len(text) <= 2:
+        return text
+    return text[2:]
+
+
+def _apply_lcl_cfs_code_trimming(shipment_values: dict[str, object]) -> dict[str, object]:
+    result = dict(shipment_values)
+    for column in list(result.keys()):
+        normalized = normalize_column_name(column).lower()
+        if normalized == "origin cfs code":
+            trimmed = _trim_lcl_cfs_code(result[column])
+            result[column] = trimmed
+            result[ORIGIN_CFS_COLUMN] = trimmed
+        elif normalized == "destination cfs code":
+            trimmed = _trim_lcl_cfs_code(result[column])
+            result[column] = trimmed
+            result[DESTINATION_CFS_COLUMN] = trimmed
+    return result
+
+
+def _selections_include_dhl(selections: list[SubfolderSelection]) -> bool:
+    return any("dhl" in selection.file_path.name.lower() for selection in selections)
+
+
+def _dhl_origin_cfs_display(value: object) -> object:
+    if pd.isna(value):
+        return value
+    if str(value).strip().upper() in DHL_ORIGIN_PORT_GROUP:
+        return DHL_ORIGIN_PORT_GROUP_LABEL
+    return value
+
+
+def _is_origin_cfs_column(column: str) -> bool:
+    return normalize_column_name(column).lower() == "origin cfs code"
 
 
 def _dedupe_key(shipment_values: dict[str, object]) -> tuple:
     return tuple(shipment_values.get(column) for column in DEDUPE_KEY_COLUMNS)
 
 
-def _resolve_cost_value(
+def _surcharge_column_value(
     row: pd.Series,
     df: pd.DataFrame,
-    cost_kind: str,
+    patterns: tuple[str, ...],
+) -> object:
+    """Read a numeric value only from a named surcharge column (never from Cost)."""
+    column = _find_optional_surcharge_column(df, patterns)
+    if column is None:
+        return None
+    return _normalize_number(row.get(column))
+
+
+def _resolve_cost_value(
+    row: pd.Series,
     cost_column: str | None,
 ) -> object:
     if cost_column is not None:
         primary = _normalize_number(row.get(cost_column))
         if primary is not None:
             return primary
-
-    if cost_kind == "ets":
-        ets_column = _find_optional_surcharge_column(df, ("ets",))
-        if ets_column is not None:
-            return _normalize_number(row.get(ets_column))
-    if cost_kind == "red_sea":
-        red_sea_column = _find_optional_surcharge_column(df, ("red sea",))
-        if red_sea_column is not None:
-            return _normalize_number(row.get(red_sea_column))
     return None
 
 
@@ -364,7 +428,6 @@ def _parse_lcl_rows_from_tab(tab_name: str, df: pd.DataFrame) -> tuple[list[Pars
     )
     cost_column = _find_cost_column(df)
     parsed_rows: list[ParsedLclRow] = []
-    surcharge_by_key: dict[tuple, dict[str, object]] = {}
 
     for _, row in df.iterrows():
         cost_kind = _normalize_cost_type(row.get(cost_type_column))
@@ -379,15 +442,29 @@ def _parse_lcl_rows_from_tab(tab_name: str, df: pd.DataFrame) -> tuple[list[Pars
             valid_from_column,
             valid_until_column,
         )
-        key = _dedupe_key(shipment_values)
-        surcharge_by_key[key] = {
-            "ets": _resolve_cost_value(row, df, "ets", cost_column),
-            "red_sea": _resolve_cost_value(row, df, "red_sea", cost_column),
-        }
+        currency = row.get("Currency LCL")
+        currency_value = None if pd.isna(currency) else str(currency).strip().upper()
+        ets_value = _surcharge_column_value(row, df, ("eu ets",))
+        red_sea_value = _surcharge_column_value(row, df, ("red sea surcharge",))
+        for surcharge_kind, surcharge_value in (
+            ("ets", ets_value),
+            ("red_sea", red_sea_value),
+        ):
+            if surcharge_value is None:
+                continue
+            parsed_rows.append(
+                ParsedLclRow(
+                    tab_name=tab_name,
+                    shipment_values=shipment_values,
+                    cost_kind=surcharge_kind,
+                    currency=currency_value,
+                    cost_value=surcharge_value,
+                )
+            )
 
     for _, row in df.iterrows():
         cost_kind = _normalize_cost_type(row.get(cost_type_column))
-        if cost_kind is None:
+        if cost_kind is None or cost_kind in {"ets", "red_sea"}:
             continue
 
         shipment_values = _build_shipment_values(
@@ -400,9 +477,7 @@ def _parse_lcl_rows_from_tab(tab_name: str, df: pd.DataFrame) -> tuple[list[Pars
         )
         currency = row.get("Currency LCL")
         currency_value = None if pd.isna(currency) else str(currency).strip().upper()
-        cost_value = _resolve_cost_value(row, df, cost_kind, cost_column)
-        if cost_value is None and cost_kind in {"ets", "red_sea"}:
-            cost_value = surcharge_by_key.get(_dedupe_key(shipment_values), {}).get(cost_kind)
+        cost_value = _resolve_cost_value(row, cost_column)
 
         parsed_rows.append(
             ParsedLclRow(
@@ -489,6 +564,9 @@ def _find_processing_sheet_name(sheet_names: list[str], source_tab: str) -> str 
 def build_lcl_rate_card_dataframe(
     parsed_rows: list[ParsedLclRow],
     shipment_columns: list[str],
+    shipper: str = "",
+    *,
+    dhl_origin_port_display: bool = False,
 ) -> tuple[pd.DataFrame, list[dict[str, object]], list[str]]:
     grouped: dict[tuple, dict[str, object]] = {}
     tab_names_by_key: dict[tuple, set[str]] = {}
@@ -523,6 +601,10 @@ def build_lcl_rate_card_dataframe(
     for key in shipment_keys:
         shipment_values = grouped[key]
         row = {column: shipment_values.get(column) for column in shipment_columns}
+        if dhl_origin_port_display:
+            for column in shipment_columns:
+                if _is_origin_cfs_column(column):
+                    row[column] = _dhl_origin_cfs_display(row.get(column))
         row["Tab Name"] = "; ".join(sorted(tab_names_by_key[key]))
         shipment_rows.append(row)
 
@@ -540,7 +622,14 @@ def build_lcl_rate_card_dataframe(
             cost_value = costs.get("cost")
             if group["include_flat_min"]:
                 flat_mins.append(cost_value)
-            p_units.append(cost_value)
+            p_unit_value = cost_value
+            if (
+                shipper in LCL_TRANSPORT_P_UNIT_DIVIDE_SHIPPERS
+                and group["key"] == "transport"
+                and isinstance(p_unit_value, (int, float))
+            ):
+                p_unit_value = float(p_unit_value) / 1000
+            p_units.append(p_unit_value)
 
         block_columns: dict[str, object] = {f"{group['key']}__currency": currencies}
         if group["include_flat_min"]:
@@ -591,6 +680,8 @@ def _build_all_de_rule(port_var: str, country_code: str, values: set[str]) -> st
 
 def build_conditional_cures_dataframe(
     parsed_rows: list[ParsedLclRow],
+    *,
+    dhl_file: bool = False,
 ) -> pd.DataFrame:
     origin_values = {
         str(row.shipment_values.get(ORIGIN_CFS_COLUMN)).strip()
@@ -604,10 +695,23 @@ def build_conditional_cures_dataframe(
     }
 
     rows: list[dict[str, str]] = []
+    dhl_origin_group = False
 
     for value in sorted(origin_values):
+        if dhl_file and value.strip().upper() in DHL_ORIGIN_PORT_GROUP:
+            dhl_origin_group = True
+            continue
         rule = _build_conditional_rule(ORIGIN_CFS_COLUMN, value, origin_values, destination_values)
         rows.append({"Column name": ORIGIN_CFS_COLUMN, "Value": value, "Conditional Rule": rule})
+
+    if dhl_origin_group:
+        rows.append(
+            {
+                "Column name": ORIGIN_CFS_COLUMN,
+                "Value": DHL_ORIGIN_PORT_GROUP_LABEL,
+                "Conditional Rule": DHL_ORIGIN_PORT_GROUP_RULE,
+            }
+        )
 
     for value in sorted(destination_values):
         rule = _build_conditional_rule(
@@ -628,6 +732,158 @@ def build_conditional_cures_dataframe(
         return pd.DataFrame(columns=CONDITIONAL_RULES_COLUMNS)
 
     return pd.DataFrame(rows, columns=CONDITIONAL_RULES_COLUMNS)
+
+
+def _healthineers_condition_row(
+    column_name: str,
+    value: str,
+    origin_values: set[str],
+    destination_values: set[str],
+) -> dict[str, str]:
+    is_origin = column_name == ORIGIN_CFS_COLUMN
+    normalized = value.strip().upper()
+    source_values = origin_values if is_origin else destination_values
+
+    if normalized == ALL_PORTS_VALUE:
+        return {
+            "Column name": column_name,
+            "Name": value,
+            "Operator": "starts with",
+            "Values": ALPHABET_RULE,
+            "Scope": "any item",
+        }
+
+    if normalized.startswith("ALL-"):
+        country_code = normalized[4:6]
+        suffixes = sorted(
+            {
+                _last_three_letters(item)
+                for item in source_values
+                if str(item).strip().upper()[:2] == country_code
+            }
+        )
+        values_text = ", ".join(suffixes) if suffixes else country_code
+        return {
+            "Column name": column_name,
+            "Name": value,
+            "Operator": "equals",
+            "Values": values_text,
+            "Scope": "any item",
+        }
+
+    return {
+        "Column name": column_name,
+        "Name": value,
+        "Operator": "equals",
+        "Values": _last_three_letters(value),
+        "Scope": "any item",
+    }
+
+
+def build_healthineers_conditions_dataframe(
+    parsed_rows: list[ParsedLclRow],
+    *,
+    dhl_file: bool = False,
+) -> pd.DataFrame:
+    origin_values = {
+        str(row.shipment_values.get(ORIGIN_CFS_COLUMN)).strip()
+        for row in parsed_rows
+        if not pd.isna(row.shipment_values.get(ORIGIN_CFS_COLUMN))
+    }
+    destination_values = {
+        str(row.shipment_values.get(DESTINATION_CFS_COLUMN)).strip()
+        for row in parsed_rows
+        if not pd.isna(row.shipment_values.get(DESTINATION_CFS_COLUMN))
+    }
+
+    rows: list[dict[str, str]] = []
+    dhl_origin_group = False
+    for value in sorted(origin_values):
+        if dhl_file and value.strip().upper() in DHL_ORIGIN_PORT_GROUP:
+            dhl_origin_group = True
+            continue
+        rows.append(
+            _healthineers_condition_row(
+                ORIGIN_CFS_COLUMN,
+                value,
+                origin_values,
+                destination_values,
+            )
+        )
+    if dhl_origin_group:
+        rows.append(
+            {
+                "Column name": ORIGIN_CFS_COLUMN,
+                "Name": DHL_ORIGIN_PORT_GROUP_LABEL,
+                "Operator": "equals",
+                "Values": DHL_ORIGIN_PORT_GROUP_VALUES,
+                "Scope": "all items",
+            }
+        )
+    for value in sorted(destination_values):
+        rows.append(
+            _healthineers_condition_row(
+                DESTINATION_CFS_COLUMN,
+                value,
+                origin_values,
+                destination_values,
+            )
+        )
+
+    if not rows:
+        return pd.DataFrame(columns=HEALTHINEERS_CONDITIONS_COLUMNS)
+    return pd.DataFrame(rows, columns=HEALTHINEERS_CONDITIONS_COLUMNS)
+
+
+def _apply_healthineers_conditions_formatting(
+    worksheet,
+    *,
+    header_row: int,
+    data_end_row: int,
+) -> None:
+    thin_border = Border(
+        left=Side(style="thin", color="BFBFBF"),
+        right=Side(style="thin", color="BFBFBF"),
+        top=Side(style="thin", color="BFBFBF"),
+        bottom=Side(style="thin", color="BFBFBF"),
+    )
+    body_font = Font(size=10)
+    header_font = Font(bold=True, size=10)
+    alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+
+    for row_index in range(1, data_end_row + 1):
+        for column_index in range(1, len(HEALTHINEERS_CONDITIONS_COLUMNS) + 1):
+            cell = worksheet.cell(row=row_index, column=column_index)
+            cell.border = thin_border
+            cell.fill = HEALTHINEERS_CONDITIONS_FILL
+            cell.alignment = alignment
+            cell.font = header_font if row_index == header_row else body_font
+
+    column_widths = {1: 22, 2: 16, 3: 12, 4: 18, 5: 14}
+    for column_index, width in column_widths.items():
+        worksheet.column_dimensions[get_column_letter(column_index)].width = width
+
+    worksheet.freeze_panes = None
+
+
+def _write_healthineers_conditions_sheet(workbook: Workbook, conditions_df: pd.DataFrame) -> None:
+    worksheet = workbook.create_sheet(title=CONDITIONAL_RULES_SHEET_NAME)
+    for column_index, column_name in enumerate(HEALTHINEERS_CONDITIONS_COLUMNS, start=1):
+        worksheet.cell(row=1, column=column_index, value=column_name)
+
+    excel_row = 2
+    data_rows = list(dataframe_to_rows(conditions_df, index=False, header=False))
+    for row in data_rows:
+        for column_offset, value in enumerate(row, start=1):
+            worksheet.cell(row=excel_row, column=column_offset, value=value)
+        excel_row += 2
+
+    data_end_row = max(1, excel_row - 1)
+    _apply_healthineers_conditions_formatting(
+        worksheet,
+        header_row=1,
+        data_end_row=data_end_row,
+    )
 
 
 def _build_conditional_rule(
@@ -907,11 +1163,24 @@ def save_lcl_rate_card(
     if not parsed_rows:
         raise ValueError("No LCL Rate/LCL_Rates rows found in selected individual rate files.")
 
+    dhl_file = _selections_include_dhl(individual_selections)
+
     rate_card_df, column_groups, shipment_columns = build_lcl_rate_card_dataframe(
         parsed_rows,
         shipment_columns,
+        shipper=shipper,
+        dhl_origin_port_display=dhl_file,
     )
-    conditional_df = build_conditional_cures_dataframe(parsed_rows)
+    if shipper == "Siemens Healthineers":
+        conditional_df = build_healthineers_conditions_dataframe(
+            parsed_rows,
+            dhl_file=dhl_file,
+        )
+    else:
+        conditional_df = build_conditional_cures_dataframe(
+            parsed_rows,
+            dhl_file=dhl_file,
+        )
 
     carrier_slug = resolve_lcl_carrier_slug(shipper, individual_selections)
     if output_path is None:
@@ -921,7 +1190,10 @@ def save_lcl_rate_card(
 
     workbook = Workbook()
     _write_rate_card_sheet(workbook, rate_card_df, column_groups, shipment_columns)
-    _write_conditional_rules_sheet(workbook, conditional_df)
+    if shipper == "Siemens Healthineers":
+        _write_healthineers_conditions_sheet(workbook, conditional_df)
+    else:
+        _write_conditional_rules_sheet(workbook, conditional_df)
     write_accessorial_costs_sheet(workbook, accessorial_df)
     workbook.save(output_path)
 
