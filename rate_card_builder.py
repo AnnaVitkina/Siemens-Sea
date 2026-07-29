@@ -37,7 +37,11 @@ from extractor import (
     slugify,
 )
 from glossary_lookup import GlossaryFeeLookup
-from rates_surcharge_lookup import RatesSurchargeLookup, load_rates_surcharge_lookup
+from rates_surcharge_lookup import (
+    RatesSurchargeLookup,
+    load_rates_surcharge_lookup,
+    _is_rf_container,
+)
 from thc_lookup import FclThcLookup, load_fcl_thc_lookup
 
 EQUIPMENT_TYPE_VALUE = "not LTL/Buyer Consolidation"
@@ -98,6 +102,10 @@ BCN_BOLD_SHIPMENT_HEADERS = {
 }
 
 CURRENCY_COLUMN_HEADER = "Currency"
+THC_FEE_COST_NAME = "THC Fee"
+THC_REMARK_FOB_INBOUND = "FOB INBOUND"
+THC_REMARK_CIF_CFR_OUTBOUND = "CIF, CFR OUTBOUND"
+IMO_ETS_RF_CONTAINER_APPLY_IF = "RF Containers"
 
 
 @dataclass(frozen=True)
@@ -166,11 +174,11 @@ def _cost_column_name(container_type_code: str) -> str:
 
 
 def _thc_inbound_column_name(container_type_code: str) -> str:
-    return f"THC Fee ({container_type_code} FOB INBOUND)"
+    return THC_FEE_COST_NAME
 
 
 def _thc_outbound_column_name(container_type_code: str) -> str:
-    return f"THC Fee ({container_type_code}, CFR OUTBOUND)"
+    return THC_FEE_COST_NAME
 
 
 def _thc_othc_column_name(container_type_code: str) -> str:
@@ -308,7 +316,9 @@ def _build_transport_thc_column_groups(
                         if use_othc_dthc_labels
                         else _thc_inbound_column_name(container_type)
                     ),
-                    "apply_if": "",
+                    "apply_if": (
+                        THC_REMARK_FOB_INBOUND if not use_othc_dthc_labels else ""
+                    ),
                     "rate_by": _thc_rate_by_value(container_type),
                     "rate_type": "p/unit",
                 },
@@ -319,7 +329,9 @@ def _build_transport_thc_column_groups(
                         if use_othc_dthc_labels
                         else _thc_outbound_column_name(container_type)
                     ),
-                    "apply_if": "",
+                    "apply_if": (
+                        THC_REMARK_CIF_CFR_OUTBOUND if not use_othc_dthc_labels else ""
+                    ),
                     "rate_by": _thc_rate_by_value(container_type),
                     "rate_type": "p/unit",
                 },
@@ -336,21 +348,27 @@ def _build_surcharge_column_groups(
 ) -> list[dict[str, str]]:
     column_groups: list[dict[str, str]] = []
     for container_type in container_types:
+        rf_apply_if = (
+            IMO_ETS_RF_CONTAINER_APPLY_IF if _is_rf_container(container_type) else ""
+        )
         column_groups.append(
             {
                 "container_type": container_type,
                 "cost_name": _imo_charges_column_name(container_type),
-                "apply_if": "",
+                "apply_if": rf_apply_if,
                 "rate_by": _thc_rate_by_value(container_type),
                 "rate_type": "p/unit",
             }
         )
     for container_type in container_types:
+        rf_apply_if = (
+            IMO_ETS_RF_CONTAINER_APPLY_IF if _is_rf_container(container_type) else ""
+        )
         column_groups.append(
             {
                 "container_type": container_type,
                 "cost_name": _ets_fee_column_name(container_type),
-                "apply_if": "",
+                "apply_if": rf_apply_if,
                 "rate_by": _thc_rate_by_value(container_type),
                 "rate_type": "p/unit",
             }
@@ -436,6 +454,23 @@ def _lookup_surcharge_columns(
         costs.append(value)
         currencies.append(lookup_currency(line_id, container_type) if value is not None else None)
     return pd.Series(currencies), pd.Series(costs)
+
+
+def _mask_imo_ets_for_reefer_lanes(
+    shipment_df: pd.DataFrame,
+    container_type: str,
+    cost_series: pd.Series,
+    currency_series: pd.Series,
+) -> tuple[pd.Series, pd.Series]:
+    if _is_rf_container(container_type):
+        return currency_series, cost_series
+    reefer_lane_mask = shipment_df["Line ID"].apply(
+        lambda line_id: str(line_id).strip().upper().startswith("R")
+    )
+    return (
+        currency_series.where(~reefer_lane_mask, None),
+        cost_series.where(~reefer_lane_mask, None),
+    )
 
 
 def _optional_pivot_series(
@@ -665,6 +700,12 @@ def build_rate_card_dataframe(
         )
         imo_cost = _fallback_when_empty(imo_cost, imo_cost_fallback)
         imo_currency = _fallback_when_empty(imo_currency, imo_currency_fallback)
+        imo_currency, imo_cost = _mask_imo_ets_for_reefer_lanes(
+            shipment_df,
+            container_type,
+            imo_cost,
+            imo_currency,
+        )
 
         ets_cost_fallback = (
             _optional_pivot_series(prepared, lane_columns, container_type, ets_value_col)
@@ -678,6 +719,12 @@ def build_rate_card_dataframe(
         )
         ets_cost = _fallback_when_empty(ets_cost, ets_cost_fallback)
         ets_currency = _fallback_when_empty(ets_currency, ets_currency_fallback)
+        ets_currency, ets_cost = _mask_imo_ets_for_reefer_lanes(
+            shipment_df,
+            container_type,
+            ets_cost,
+            ets_currency,
+        )
         transport_thc_blocks.append(
             pd.DataFrame(
                 {
@@ -812,6 +859,156 @@ def _column_group_width(meta: dict[str, object]) -> int:
     return int(meta.get("column_count", 2))
 
 
+def _fcl_duplicate_lane_flags(shipment_df: pd.DataFrame, shipment_columns: tuple[str, ...]) -> list[bool]:
+    if shipment_df.empty:
+        return []
+    if "Line ID" in shipment_df.columns:
+        lane_keys = shipment_df["Line ID"].map(_normalize_fcl_line_id_for_merge)
+        return lane_keys.duplicated(keep=False).tolist()
+    present_columns = [column for column in shipment_columns if column in shipment_df.columns]
+    if not present_columns:
+        return [False] * len(shipment_df)
+    lane_keys = shipment_df[present_columns].fillna("").astype(str).agg("\x1f".join, axis=1)
+    return lane_keys.duplicated(keep=False).tolist()
+
+
+FCL_LANE_MERGE_KEY_COLUMNS = ("Line ID",)
+
+
+def _is_empty_rate_card_value(value: object) -> bool:
+    if value is None or pd.isna(value):
+        return True
+    if isinstance(value, str) and not value.strip():
+        return True
+    return False
+
+
+def _normalize_fcl_line_id_for_merge(value: object) -> str:
+    if _is_empty_rate_card_value(value):
+        return ""
+    if isinstance(value, float) and float(value).is_integer():
+        value = int(value)
+    text = str(value).strip().upper()
+    if text.endswith(".0") and text[:-2].isdigit():
+        text = text[:-2]
+    if text.startswith("R"):
+        digits = "".join(character for character in text if character.isdigit())
+        return f"R{digits.zfill(4)}" if digits else text
+    digits = "".join(character for character in text if character.isdigit())
+    return digits.zfill(4) if digits else text
+
+
+def _fcl_lane_merge_group_key(
+    row: pd.Series,
+    merge_key_columns: tuple[str, ...],
+) -> str:
+    parts: list[str] = []
+    for column in merge_key_columns:
+        value = row.get(column)
+        if column == "Line ID":
+            parts.append(_normalize_fcl_line_id_for_merge(value))
+            continue
+        parts.append("" if _is_empty_rate_card_value(value) else str(value).strip())
+    return "\x1f".join(parts)
+
+
+def _rate_card_values_equal(left: object, right: object) -> bool:
+    if _is_empty_rate_card_value(left) or _is_empty_rate_card_value(right):
+        return False
+    try:
+        if abs(float(left) - float(right)) < 1e-9:
+            return True
+    except (TypeError, ValueError):
+        pass
+    left_norm = _normalize_number(left)
+    right_norm = _normalize_number(right)
+    if isinstance(left_norm, (int, float)) and isinstance(right_norm, (int, float)):
+        return float(left_norm) == float(right_norm)
+    return str(left_norm).strip().upper() == str(right_norm).strip().upper()
+
+
+def _coalesce_rate_card_values(values: list[object]) -> object:
+    for value in values:
+        if not _is_empty_rate_card_value(value):
+            return value
+    return None
+
+
+def _cost_column_values_mergeable(values: list[object]) -> bool:
+    non_empty = [value for value in values if not _is_empty_rate_card_value(value)]
+    if len(non_empty) <= 1:
+        return True
+    first = non_empty[0]
+    return all(_rate_card_values_equal(first, value) for value in non_empty[1:])
+
+
+def _fcl_merge_check_columns(cost_columns: list[str]) -> list[str]:
+    return [column for column in cost_columns if "__currency" not in column.lower()]
+
+
+def _merge_fcl_lane_group(
+    group_df: pd.DataFrame,
+    cost_columns: list[str],
+    optional_shipment_columns: list[str],
+) -> list[pd.Series]:
+    if len(group_df) == 1:
+        return [group_df.iloc[0]]
+
+    for column in _fcl_merge_check_columns(cost_columns):
+        if not _cost_column_values_mergeable(group_df[column].tolist()):
+            return [group_df.iloc[index] for index in range(len(group_df))]
+
+    merged = group_df.iloc[0].copy()
+    for column in cost_columns:
+        merged[column] = _coalesce_rate_card_values(group_df[column].tolist())
+    for column in optional_shipment_columns:
+        if column in merged.index:
+            merged[column] = _coalesce_rate_card_values(group_df[column].tolist())
+    if "Line ID" in merged.index:
+        normalized = _normalize_fcl_line_id_for_merge(merged.get("Line ID"))
+        if normalized and not str(normalized).startswith("R"):
+            merged["Line ID"] = normalized
+    return [merged]
+
+
+def _merge_fcl_compatible_lanes(
+    rate_card_df: pd.DataFrame,
+    shipment_columns: tuple[str, ...],
+) -> pd.DataFrame:
+    if rate_card_df.empty or len(rate_card_df) < 2:
+        return rate_card_df
+
+    merge_key_columns = tuple(
+        column for column in FCL_LANE_MERGE_KEY_COLUMNS if column in rate_card_df.columns
+    )
+    if not merge_key_columns:
+        return rate_card_df
+
+    shipment_column_set = set(shipment_columns)
+    cost_columns = [column for column in rate_card_df.columns if column not in shipment_column_set]
+    optional_shipment_columns = [
+        column for column in shipment_columns if column not in merge_key_columns
+    ]
+
+    grouped_rows: list[pd.Series] = []
+    group_keys = rate_card_df.apply(
+        lambda row: _fcl_lane_merge_group_key(row, merge_key_columns),
+        axis=1,
+    )
+    for group_key, group_df in rate_card_df.groupby(group_keys, sort=False):
+        if not str(group_key).strip():
+            grouped_rows.extend(group_df.iloc[index] for index in range(len(group_df)))
+            continue
+        merged_group_rows = _merge_fcl_lane_group(
+            group_df,
+            cost_columns,
+            optional_shipment_columns,
+        )
+        grouped_rows.extend(merged_group_rows)
+
+    return pd.DataFrame(grouped_rows, columns=rate_card_df.columns).reset_index(drop=True)
+
+
 def _apply_rate_card_formatting(
     worksheet,
     shipment_count: int,
@@ -820,6 +1017,7 @@ def _apply_rate_card_formatting(
     data_end_row: int,
     cost_column_groups: list[tuple[int, ...]],
     profile: RateCardFlowProfile,
+    duplicate_lane_rows: list[bool] | None = None,
 ) -> None:
     thin_border = Border(
         left=Side(style="thin", color="BFBFBF"),
@@ -829,6 +1027,7 @@ def _apply_rate_card_formatting(
     )
     shipment_fill = PatternFill(fill_type="solid", fgColor="D9E1F2")
     cost_fill = PatternFill(fill_type="solid", fgColor="E2EFDA")
+    duplicate_lane_fill = PatternFill(fill_type="solid", fgColor="FFC7CE")
     header_font = Font(bold=True, size=10)
     normal_header_font = Font(bold=False, size=10)
     body_font = Font(size=10)
@@ -856,10 +1055,18 @@ def _apply_rate_card_formatting(
                 cell.fill = cost_fill if column_index > shipment_count else shipment_fill
 
     for row_index in range(data_start_row, data_end_row + 1):
+        data_row_index = row_index - data_start_row
+        is_duplicate_lane = (
+            duplicate_lane_rows is not None
+            and data_row_index < len(duplicate_lane_rows)
+            and duplicate_lane_rows[data_row_index]
+        )
         for column_index in range(1, total_columns + 1):
             cell = worksheet.cell(row=row_index, column=column_index)
             cell.border = thin_border
             cell.font = body_font
+            if is_duplicate_lane:
+                cell.fill = duplicate_lane_fill
             if column_index <= shipment_count:
                 cell.alignment = left
             elif _is_currency_column(column_index, shipment_count, cost_column_groups):
@@ -981,6 +1188,14 @@ def _write_rate_card_sheet(
 
     data_start_row = profile.cost_header_rows + 1
     data_rows = list(dataframe_to_rows(rate_card_df, index=False, header=False))
+    duplicate_lane_rows: list[bool] | None = None
+    if profile.flow == "FCL":
+        shipment_cols = list(profile.shipment_columns)
+        duplicate_lane_rows = _fcl_duplicate_lane_flags(
+            rate_card_df[shipment_cols],
+            profile.shipment_columns,
+        )
+
     for row_offset, row in enumerate(data_rows, start=data_start_row):
         for column_offset, value in enumerate(row, start=1):
             worksheet.cell(row=row_offset, column=column_offset, value=value)
@@ -995,6 +1210,7 @@ def _write_rate_card_sheet(
         data_end_row=data_end_row,
         cost_column_groups=cost_column_groups,
         profile=profile,
+        duplicate_lane_rows=duplicate_lane_rows,
     )
 
 
@@ -1065,6 +1281,11 @@ def save_rate_card(
         column_groups,
         shipment_count=len(profile.shipment_columns),
     )
+    if flow == "FCL":
+        rate_card_df = _merge_fcl_compatible_lanes(
+            rate_card_df,
+            profile.shipment_columns,
+        )
 
     if output_path is None:
         output_path = build_output_rate_card_path(flow, shipper)
