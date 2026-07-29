@@ -93,6 +93,18 @@ def _find_column(columns: list[str], *candidates: str) -> str | None:
     return None
 
 
+def _find_validity_columns(columns: list[str]) -> tuple[str | None, str | None]:
+    valid_from_col: str | None = None
+    valid_until_col: str | None = None
+    for col in columns:
+        normalized = col.lower().replace("\n", " ")
+        if "valid from" in normalized:
+            valid_from_col = col
+        elif "valid until" in normalized or normalized.endswith("valid to"):
+            valid_until_col = col
+    return valid_from_col, valid_until_col
+
+
 def _resolve_actual_rate_column(columns: list[str]) -> str | None:
     for col in columns:
         low = col.lower()
@@ -119,8 +131,11 @@ def build_innomotics_rate_card_dataframe(selections: list[SubfolderSelection]) -
             origin_cfs_name_col = _find_column(columns, "Origin CFS Name")
             dest_country_col = _find_column(columns, "Destination Country")
             dest_cfs_code_col = _find_column(columns, "Destination CFS Code")
-            valid_from_col = _find_column(columns, "Valid from")
-            valid_to_col = _find_column(columns, "Valid until", "Valid to")
+            valid_from_col, valid_to_col = _find_validity_columns(columns)
+            if valid_from_col is None:
+                valid_from_col = _find_column(columns, "Valid from")
+            if valid_to_col is None:
+                valid_to_col = _find_column(columns, "Valid until", "Valid to")
             currency_col = _find_column(columns, "Currency LCL")
             cost_type_col = _find_column(columns, "Cost type", "Cost Type")
             actual_rate_col = _resolve_actual_rate_column(columns)
