@@ -113,6 +113,7 @@ LCL_TRANSPORT_P_UNIT_DIVIDE_SHIPPERS = frozenset(
 LCL_STRUCTURED_CONDITIONS_SHIPPERS = frozenset(
     {"Siemens Healthineers", "Siemens Divisions"}
 )
+LCL_DHL_BRE_GROUP_SHIPPER = "Siemens Divisions"
 ORIGIN_CFS_COLUMN = "Origin CFS Code"
 DESTINATION_CFS_COLUMN = "Destination CFS Code"
 ALL_PORTS_VALUE = "ALL PORTS"
@@ -1167,22 +1168,23 @@ def save_lcl_rate_card(
         raise ValueError("No LCL Rate/LCL_Rates rows found in selected individual rate files.")
 
     dhl_file = _selections_include_dhl(individual_selections)
+    dhl_bre_origin_group = dhl_file and shipper == LCL_DHL_BRE_GROUP_SHIPPER
 
     rate_card_df, column_groups, shipment_columns = build_lcl_rate_card_dataframe(
         parsed_rows,
         shipment_columns,
         shipper=shipper,
-        dhl_origin_port_display=dhl_file,
+        dhl_origin_port_display=dhl_bre_origin_group,
     )
     if shipper in LCL_STRUCTURED_CONDITIONS_SHIPPERS:
         conditional_df = build_healthineers_conditions_dataframe(
             parsed_rows,
-            dhl_file=dhl_file,
+            dhl_file=dhl_bre_origin_group,
         )
     else:
         conditional_df = build_conditional_cures_dataframe(
             parsed_rows,
-            dhl_file=dhl_file,
+            dhl_file=dhl_bre_origin_group,
         )
 
     carrier_slug = resolve_lcl_carrier_slug(shipper, individual_selections)
