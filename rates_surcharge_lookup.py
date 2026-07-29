@@ -11,6 +11,11 @@ from extractor import extract_sheet_to_dataframe, list_excel_files, load_process
 from thc_lookup import _extract_container_size
 
 
+def _is_rf_container(container_type_code: str) -> bool:
+    code = str(container_type_code).upper()
+    return "_RF" in code or code.endswith("RF")
+
+
 def _normalize_line_id(value: object) -> str | None:
     if pd.isna(value):
         return None
@@ -220,25 +225,44 @@ class RatesSurchargeLookup:
 
         return cls(rates_rows, reefer_rows, rates_columns, reefer_columns)
 
+    def _resolve_imo_ets_row(
+        self,
+        line_id: object,
+        container_type_code: str,
+    ) -> tuple[pd.Series | None, dict[str, str], bool]:
+        normalized_line_id = _normalize_line_id(line_id)
+        if not normalized_line_id:
+            return None, {}, False
+
+        rf_container = _is_rf_container(container_type_code)
+        if normalized_line_id.startswith("R"):
+            if not rf_container:
+                return None, {}, False
+            return self.reefer_rows.get(normalized_line_id), self.reefer_columns, True
+
+        if rf_container:
+            return self.reefer_rows.get(normalized_line_id), self.reefer_columns, True
+        return self.rates_rows.get(normalized_line_id), self.rates_columns, False
+
     def _resolve_row(self, line_id: object, container_type_code: str) -> tuple[pd.Series | None, dict[str, str], bool]:
         normalized_line_id = _normalize_line_id(line_id)
         if not normalized_line_id:
             return None, {}, False
 
-        use_reefer = normalized_line_id.startswith("R") or "RF" in str(container_type_code).upper()
+        use_reefer = normalized_line_id.startswith("R") or _is_rf_container(container_type_code)
         if use_reefer:
             return self.reefer_rows.get(normalized_line_id), self.reefer_columns, True
         return self.rates_rows.get(normalized_line_id), self.rates_columns, False
 
     def lookup_imo(self, line_id: object, container_type_code: str) -> float | None:
-        row, columns, _reefer_sheet = self._resolve_row(line_id, container_type_code)
+        row, columns, _reefer_sheet = self._resolve_imo_ets_row(line_id, container_type_code)
         if row is None:
             return None
         imo, _ = _extract_imo_ets_values(row, columns, container_type_code)
         return imo
 
     def lookup_ets(self, line_id: object, container_type_code: str) -> float | None:
-        row, columns, _reefer_sheet = self._resolve_row(line_id, container_type_code)
+        row, columns, _reefer_sheet = self._resolve_imo_ets_row(line_id, container_type_code)
         if row is None:
             return None
         _, ets = _extract_imo_ets_values(row, columns, container_type_code)
