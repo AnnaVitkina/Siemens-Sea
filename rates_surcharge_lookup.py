@@ -16,15 +16,92 @@ def _is_rf_container(container_type_code: str) -> bool:
     return "_RF" in code or code.endswith("RF")
 
 
-def _normalize_line_id(value: object) -> str | None:
+def is_line_id_column(column: object) -> bool:
+    return _normalize_column_name(column).lower() == "line id"
+
+
+def _format_numeric_line_id(value: int) -> str:
+    """Recover leading zeros when Excel already coerced Line ID to a number."""
+    if value < 0:
+        return str(value)
+    digits = str(value)
+    if value < 1000:
+        return digits.zfill(4)
+    if value < 100000:
+        return digits.zfill(5)
+    return digits
+
+
+def format_line_id(value: object) -> str | None:
+    """Preserve Line ID text from source (4 or 5 digits, with leading zeros)."""
     if pd.isna(value):
         return None
-    line_id = str(value).strip()
-    if line_id.upper().startswith("R"):
-        digits = "".join(character for character in line_id if character.isdigit())
-        return f"R{digits.zfill(4)}" if digits else line_id.upper()
-    digits = "".join(character for character in line_id if character.isdigit())
-    return digits.zfill(4) if digits else line_id
+    if isinstance(value, bool):
+        return str(value)
+
+    if isinstance(value, int):
+        return _format_numeric_line_id(value)
+    if isinstance(value, float):
+        if float(value).is_integer():
+            return _format_numeric_line_id(int(value))
+        return str(value).strip()
+
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.endswith(".0") and text[:-2].isdigit():
+        return _format_numeric_line_id(int(text[:-2]))
+    return text
+
+
+def line_id_read_converters(columns: list[object]) -> dict[object, type]:
+    return {column: str for column in columns if is_line_id_column(column)}
+
+
+def read_excel_preserving_line_id(
+    file_path: Path,
+    sheet_name: str,
+    *,
+    header: int | None = 0,
+    engine: str | None = None,
+) -> pd.DataFrame:
+    preview = pd.read_excel(
+        file_path,
+        sheet_name=sheet_name,
+        header=header,
+        nrows=0,
+        engine=engine,
+    )
+    converters = line_id_read_converters(list(preview.columns))
+    df = pd.read_excel(
+        file_path,
+        sheet_name=sheet_name,
+        header=header,
+        engine=engine,
+        converters=converters or None,
+    )
+    return apply_line_id_formatting(df)
+
+
+def apply_line_id_formatting(
+    df: pd.DataFrame,
+    columns: list[str] | tuple[str, ...] | None = None,
+) -> pd.DataFrame:
+    if df.empty:
+        return df
+    result = df.copy()
+    target_columns = list(columns) if columns is not None else list(result.columns)
+    for column in target_columns:
+        if column not in result.columns:
+            continue
+        if _normalize_column_name(column).lower() != "line id":
+            continue
+        result[column] = result[column].apply(format_line_id)
+    return result
+
+
+def _normalize_line_id(value: object) -> str | None:
+    return format_line_id(value)
 
 
 def _normalize_column_name(column: object) -> str:
@@ -317,8 +394,16 @@ def load_rates_surcharge_lookup(
     strict: bool = True,
 ) -> RatesSurchargeLookup:
     if processing_path and processing_path.exists():
-        rates_df = pd.read_excel(processing_path, sheet_name=RATES_BASE_TAB)
-        reefer_df = pd.read_excel(processing_path, sheet_name=RATES_REEFER_TAB)
+        rates_df = read_excel_preserving_line_id(
+            processing_path,
+            RATES_BASE_TAB,
+            header=0,
+        )
+        reefer_df = read_excel_preserving_line_id(
+            processing_path,
+            RATES_REEFER_TAB,
+            header=0,
+        )
         return RatesSurchargeLookup.from_dataframes(rates_df, reefer_df, strict=strict)
 
     if source_file and source_file.exists():
@@ -332,8 +417,16 @@ def load_rates_surcharge_lookup(
         if context_path.exists():
             sheet_names = pd.ExcelFile(context_path).sheet_names
             if RATES_BASE_TAB in sheet_names and RATES_REEFER_TAB in sheet_names:
-                rates_df = pd.read_excel(context_path, sheet_name=RATES_BASE_TAB)
-                reefer_df = pd.read_excel(context_path, sheet_name=RATES_REEFER_TAB)
+                rates_df = read_excel_preserving_line_id(
+                    context_path,
+                    RATES_BASE_TAB,
+                    header=0,
+                )
+                reefer_df = read_excel_preserving_line_id(
+                    context_path,
+                    RATES_REEFER_TAB,
+                    header=0,
+                )
                 return RatesSurchargeLookup.from_dataframes(rates_df, reefer_df, strict=strict)
 
     main_rate_files = list_excel_files("main rates")
