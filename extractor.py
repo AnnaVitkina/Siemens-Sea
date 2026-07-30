@@ -82,9 +82,9 @@ def resolve_sheet_header_row(sheet_name: str) -> int | None:
     if sheet_name in SHEET_HEADER_ROWS:
         return SHEET_HEADER_ROWS[sheet_name]
 
-    from lcl_rate_card_builder import is_lcl_rates_tab
+    from lcl_rate_card_builder import is_lcl_data_tab
 
-    if is_lcl_rates_tab(sheet_name):
+    if is_lcl_data_tab(sheet_name):
         return 0
     return None
 
@@ -113,13 +113,15 @@ def _read_excel_engine(file_path: Path) -> str | None:
 
 
 def extract_sheet_to_dataframe(file_path: Path, sheet_name: str) -> pd.DataFrame:
-    from lcl_rate_card_builder import is_lcl_rates_tab, read_lcl_rates_tab_dataframe
+    from lcl_rate_card_builder import is_lcl_data_tab, read_lcl_rates_tab_dataframe
 
-    if is_lcl_rates_tab(sheet_name):
+    if is_lcl_data_tab(sheet_name):
         return read_lcl_rates_tab_dataframe(file_path, sheet_name)
 
     header_row = resolve_sheet_header_row(sheet_name)
     engine = _read_excel_engine(file_path)
+
+    from rates_surcharge_lookup import read_excel_preserving_line_id
 
     if header_row is None:
         return pd.read_excel(
@@ -129,9 +131,9 @@ def extract_sheet_to_dataframe(file_path: Path, sheet_name: str) -> pd.DataFrame
             engine=engine,
         )
 
-    return pd.read_excel(
+    return read_excel_preserving_line_id(
         file_path,
-        sheet_name=sheet_name,
+        sheet_name,
         header=header_row,
         engine=engine,
     )
@@ -253,9 +255,9 @@ def resolve_output_tab_name(
     if tab == ADDON_SMF_TAB:
         return f"Add-on SMF (FCL)_{carrier_key}"
 
-    from lcl_rate_card_builder import is_lcl_rates_tab
+    from lcl_rate_card_builder import is_lcl_data_tab
 
-    if flow == "LCL" and is_lcl_rates_tab(tab):
+    if flow == "LCL" and is_lcl_data_tab(tab):
         if carrier_key:
             return f"LCL_{carrier_key}_{tab}"
         return f"LCL_{tab}"
@@ -312,6 +314,16 @@ def save_selections_to_excel(
             for tab in selection.tabs:
                 df = extract_sheet_to_dataframe(selection.file_path, tab)
                 df = clean_sheet_dataframe(tab, df)
+                from rates_surcharge_lookup import apply_line_id_formatting, format_line_id, is_line_id_column
+
+                df = apply_line_id_formatting(df)
+                for column in df.columns:
+                    if is_line_id_column(column):
+                        df[column] = df[column].map(
+                            lambda value: format_line_id(value)
+                            if not pd.isna(value)
+                            else value
+                        )
                 output_tab = sanitize_excel_sheet_name(
                     resolve_output_tab_name(tab, selection, shipper, flow),
                     used_sheet_names,
