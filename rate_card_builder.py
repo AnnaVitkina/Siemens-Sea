@@ -42,7 +42,7 @@ from rates_surcharge_lookup import (
     load_rates_surcharge_lookup,
     _is_rf_container,
 )
-from thc_lookup import FclThcLookup, load_fcl_thc_lookup
+from rates_surcharge_lookup import apply_line_id_formatting, format_line_id, read_excel_preserving_line_id
 
 EQUIPMENT_TYPE_VALUE = "not LTL/Buyer Consolidation"
 
@@ -282,6 +282,8 @@ def _prepare_source_dataframe(
     prepared["Valid from Fmt"] = prepared["Valid from"].apply(_format_date)
     prepared["Valid to Fmt"] = prepared["Valid until"].apply(_format_date)
     prepared["Equipment type"] = profile.equipment_type_value
+    if "Line ID" in prepared.columns:
+        prepared["Line ID"] = prepared["Line ID"].apply(format_line_id)
     if profile.include_measurement_type:
         prepared["Measurement Type"] = prepared["Line ID"].apply(_measurement_type)
 
@@ -834,7 +836,7 @@ def build_rate_card_dataframe(
         ],
         axis=1,
     )
-    return rate_card_df, column_groups, profile
+    return apply_line_id_formatting(rate_card_df, profile.shipment_columns), column_groups, profile
 
 
 def build_fcl_rate_card_dataframe(
@@ -884,18 +886,8 @@ def _is_empty_rate_card_value(value: object) -> bool:
 
 
 def _normalize_fcl_line_id_for_merge(value: object) -> str:
-    if _is_empty_rate_card_value(value):
-        return ""
-    if isinstance(value, float) and float(value).is_integer():
-        value = int(value)
-    text = str(value).strip().upper()
-    if text.endswith(".0") and text[:-2].isdigit():
-        text = text[:-2]
-    if text.startswith("R"):
-        digits = "".join(character for character in text if character.isdigit())
-        return f"R{digits.zfill(4)}" if digits else text
-    digits = "".join(character for character in text if character.isdigit())
-    return digits.zfill(4) if digits else text
+    formatted = format_line_id(value)
+    return formatted or ""
 
 
 def _fcl_lane_merge_group_key(
@@ -966,7 +958,7 @@ def _merge_fcl_lane_group(
             merged[column] = _coalesce_rate_card_values(group_df[column].tolist())
     if "Line ID" in merged.index:
         normalized = _normalize_fcl_line_id_for_merge(merged.get("Line ID"))
-        if normalized and not str(normalized).startswith("R"):
+        if normalized:
             merged["Line ID"] = normalized
     return [merged]
 
@@ -1069,6 +1061,13 @@ def _apply_rate_card_formatting(
                 cell.fill = duplicate_lane_fill
             if column_index <= shipment_count:
                 cell.alignment = left
+                if (
+                    column_index
+                    <= len(profile.shipment_columns)
+                    and str(profile.shipment_columns[column_index - 1]).strip().lower()
+                    == "line id"
+                ):
+                    cell.number_format = "@"
             elif _is_currency_column(column_index, shipment_count, cost_column_groups):
                 cell.alignment = center
             else:
@@ -1198,6 +1197,15 @@ def _write_rate_card_sheet(
 
     for row_offset, row in enumerate(data_rows, start=data_start_row):
         for column_offset, value in enumerate(row, start=1):
+            if (
+                column_offset <= shipment_count
+                and str(profile.shipment_columns[column_offset - 1]).strip().lower()
+                == "line id"
+                and value is not None
+            ):
+                formatted = format_line_id(value)
+                if formatted is not None:
+                    value = str(formatted)
             worksheet.cell(row=row_offset, column=column_offset, value=value)
 
     total_columns = shipment_count + sum(_column_group_width(meta) for meta in column_groups)
@@ -1286,6 +1294,7 @@ def save_rate_card(
             rate_card_df,
             profile.shipment_columns,
         )
+        rate_card_df = apply_line_id_formatting(rate_card_df, profile.shipment_columns)
 
     if output_path is None:
         output_path = build_output_rate_card_path(flow, shipper)
@@ -1330,7 +1339,11 @@ def load_digi_fcl_rates_dataframe(
     source_file: Path | None = None,
 ) -> pd.DataFrame:
     if processing_path and processing_path.exists():
-        return pd.read_excel(processing_path, sheet_name=FCL_BASE_TAB)
+        return read_excel_preserving_line_id(
+            processing_path,
+            FCL_BASE_TAB,
+            header=0,
+        )
 
     if source_file and source_file.exists():
         extracted = extract_sheet_to_dataframe(source_file, FCL_BASE_TAB)
@@ -1340,7 +1353,11 @@ def load_digi_fcl_rates_dataframe(
     if context:
         context_path = Path(context["output_path"])
         if context_path.exists():
-            return pd.read_excel(context_path, sheet_name=FCL_BASE_TAB)
+            return read_excel_preserving_line_id(
+                context_path,
+                FCL_BASE_TAB,
+                header=0,
+            )
 
     main_rate_files = list_excel_files("main rates")
     for file_path in main_rate_files:
