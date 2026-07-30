@@ -20,6 +20,11 @@ from accessorial_costs import (
 )
 from carrier_lookup import carrier_code_from_filename, detect_carrier_key
 from date_utils import format_dd_mm_yyyy
+from rates_surcharge_lookup import (
+    apply_line_id_formatting,
+    format_line_id,
+    line_id_read_converters,
+)
 from config import (
     CONDITIONAL_RULES_SHEET_NAME,
     GLOSSARY_TAB,
@@ -63,8 +68,11 @@ COST_TYPE_ALIASES = {
     "EU ETS SURCHARGE": "ets",
     "IMO CHARGE": "imo",
     "RED SEA SURCHARGE": "red_sea",
+    "PERSIAN GULF SURCHARGE": "persian_gulf",
     "LCL RATE ADDER 100% CO2 INSETTING": "biofuel",
 }
+
+GST_LCL_ALLOWED_COST_KINDS = frozenset({"transport"})
 
 LCL_COST_GROUPS = (
     {
@@ -91,6 +99,13 @@ LCL_COST_GROUPS = (
     {
         "key": "red_sea",
         "cost_name": "Red Sea Surcharge",
+        "apply_if": "LTL/Standard",
+        "rate_by": "Volume/cbm",
+        "include_flat_min": False,
+    },
+    {
+        "key": "persian_gulf",
+        "cost_name": "Persian Gulf Surcharge",
         "apply_if": "LTL/Standard",
         "rate_by": "Volume/cbm",
         "include_flat_min": False,
@@ -140,12 +155,28 @@ def is_lcl_rates_tab(tab_name: str) -> bool:
     return "lclrate" in normalized or "ltlrate" in normalized
 
 
+def is_gst_lcl_tab(tab_name: str) -> bool:
+    normalized = re.sub(r"[\s_]+", "", tab_name.lower())
+    return normalized.startswith("gst")
+
+
+def is_lcl_data_tab(tab_name: str) -> bool:
+    return is_lcl_rates_tab(tab_name) or is_gst_lcl_tab(tab_name)
+
+
 def resolve_lcl_rates_tabs(file_path: Path) -> list[str]:
     return [tab for tab in read_workbook_sheet_names(file_path) if is_lcl_rates_tab(tab)]
 
 
+def resolve_gst_lcl_tabs(file_path: Path) -> list[str]:
+    return [tab for tab in read_workbook_sheet_names(file_path) if is_gst_lcl_tab(tab)]
+
+
 def resolve_lcl_tabs(file_path: Path) -> list[str]:
     tabs = resolve_lcl_rates_tabs(file_path)
+    for tab in resolve_gst_lcl_tabs(file_path):
+        if tab not in tabs:
+            tabs.append(tab)
     if GLOSSARY_TAB in read_workbook_sheet_names(file_path):
         tabs.append(GLOSSARY_TAB)
     return tabs
@@ -181,9 +212,25 @@ def read_lcl_rates_tab_dataframe(file_path: Path, tab_name: str) -> pd.DataFrame
     engine = _read_excel_engine(file_path)
     raw = pd.read_excel(file_path, sheet_name=tab_name, header=None, engine=engine)
     header_row = _detect_lcl_rates_header_row(raw)
-    df = pd.read_excel(file_path, sheet_name=tab_name, header=header_row, engine=engine)
+    preview = pd.read_excel(
+        file_path,
+        sheet_name=tab_name,
+        header=header_row,
+        nrows=0,
+        engine=engine,
+    )
+    preview = normalize_dataframe_columns(preview)
+    converters = line_id_read_converters(list(preview.columns))
+    df = pd.read_excel(
+        file_path,
+        sheet_name=tab_name,
+        header=header_row,
+        engine=engine,
+        converters=converters or None,
+    )
     df = normalize_dataframe_columns(df)
-    return df.dropna(axis=1, how="all").dropna(axis=0, how="all")
+    df = df.dropna(axis=1, how="all").dropna(axis=0, how="all")
+    return apply_line_id_formatting(df)
 
 
 def _find_cost_type_column(df: pd.DataFrame) -> str | None:
@@ -272,7 +319,80 @@ def _normalize_cost_type(value: object) -> str | None:
     if pd.isna(value):
         return None
     normalized = re.sub(r"\s+", " ", str(value).strip()).upper()
+    if "PERSIAN GULF" in normalized:
+        return "persian_gulf"
     return COST_TYPE_ALIASES.get(normalized)
+
+
+def _find_lane_id_column(columns: list[str]) -> str | None:
+    for column in columns:
+        if normalize_column_name(column).lower() == "lane id":
+            return column
+    return None
+
+
+def _normalize_lane_id(value: object) -> str | None:
+    if pd.isna(value):
+        return None
+    if isinstance(value, float) and float(value).is_integer():
+        value = int(value)
+    text = str(value).strip().upper()
+    if text.endswith(".0") and text[:-2].replace(".", "", 1).isdigit():
+        text = text[:-2]
+    return text or None
+
+
+def _lane_id_from_shipment_values(shipment_values: dict[str, object]) -> str | None:
+    for column, value in shipment_values.items():
+        if normalize_column_name(column).lower() == "lane id":
+            return _normalize_lane_id(value)
+    return None
+
+
+def _apply_persian_gulf_costs_by_lane_id(
+    parsed_rows: list[ParsedLclRow],
+    costs_by_key: dict[tuple, dict[str, dict[str, object]]],
+    grouped: dict[tuple, dict[str, object]],
+    persian_gulf_by_lane_id: dict[str, tuple[str | None, object]] | None = None,
+) -> None:
+    persian_by_lane_id: dict[str, dict[str, object]] = {}
+
+    if persian_gulf_by_lane_id:
+        for lane_id, (currency, cost_value) in persian_gulf_by_lane_id.items():
+            if cost_value is not None:
+                persian_by_lane_id[lane_id] = {
+                    "currency": currency,
+                    "cost": cost_value,
+                }
+
+    for parsed_row in parsed_rows:
+        lane_id = _lane_id_from_shipment_values(parsed_row.shipment_values)
+        if lane_id is None:
+            continue
+        if parsed_row.cost_kind != "persian_gulf" or parsed_row.cost_value is None:
+            continue
+        persian_by_lane_id[lane_id] = {
+            "currency": parsed_row.currency,
+            "cost": parsed_row.cost_value,
+        }
+
+    transport_keys_by_lane_id: dict[str, list[tuple]] = {}
+    for key, shipment_values in grouped.items():
+        if "transport" not in costs_by_key.get(key, {}):
+            continue
+        lane_id = _lane_id_from_shipment_values(shipment_values)
+        if lane_id is None:
+            continue
+        transport_keys_by_lane_id.setdefault(lane_id, []).append(key)
+
+    for lane_id, persian_costs in persian_by_lane_id.items():
+        for transport_key in transport_keys_by_lane_id.get(lane_id, []):
+            existing = costs_by_key.get(transport_key, {}).get("persian_gulf", {})
+            if existing.get("cost") is not None:
+                continue
+            costs_by_key.setdefault(transport_key, {})
+            costs_by_key[transport_key].setdefault("persian_gulf", {})
+            costs_by_key[transport_key]["persian_gulf"].update(persian_costs)
 
 
 def _shipment_column_order(
@@ -343,7 +463,13 @@ def _build_shipment_values(
         values["Valid to"] = _format_lcl_date(row[valid_until_column])
 
     result = {column: values.get(column) for column in shipment_column_order}
-    return _apply_lcl_cfs_code_trimming(result)
+    result = _apply_lcl_cfs_code_trimming(result)
+    for column in list(result.keys()):
+        if normalize_column_name(column).lower() == "line id":
+            formatted = format_line_id(result[column])
+            if formatted is not None:
+                result[column] = formatted
+    return result
 
 
 def _trim_lcl_cfs_code(value: object) -> object:
@@ -418,7 +544,83 @@ def _resolve_cost_value(
     return None
 
 
-def _parse_lcl_rows_from_tab(tab_name: str, df: pd.DataFrame) -> tuple[list[ParsedLclRow], list[str]]:
+def _collect_persian_gulf_surcharges_by_lane_id(
+    df: pd.DataFrame,
+    *,
+    tab_name: str,
+    cost_type_column: str,
+    pre_cost_columns: list[str],
+    shipment_column_order: list[str],
+    valid_from_column: str | None,
+    valid_until_column: str | None,
+    cost_column: str | None,
+    persian_gulf_lookup: dict[str, tuple[str | None, object]],
+) -> None:
+    lane_id_column = _find_lane_id_column(list(df.columns))
+    for _, row in df.iterrows():
+        cost_kind = _normalize_cost_type(row.get(cost_type_column))
+        if cost_kind != "persian_gulf":
+            continue
+        shipment_values = _build_shipment_values(
+            row,
+            tab_name,
+            pre_cost_columns,
+            shipment_column_order,
+            valid_from_column,
+            valid_until_column,
+        )
+        cost_value = _resolve_cost_value(row, cost_column)
+        if cost_value is None:
+            continue
+        currency = row.get("Currency LCL")
+        currency_value = None if pd.isna(currency) else str(currency).strip().upper()
+        lane_id = (
+            _normalize_lane_id(row.get(lane_id_column))
+            if lane_id_column is not None
+            else _lane_id_from_shipment_values(shipment_values)
+        )
+        if lane_id is None:
+            continue
+        persian_gulf_lookup[lane_id] = (currency_value, cost_value)
+
+
+def _collect_persian_gulf_from_tab(
+    tab_name: str,
+    df: pd.DataFrame,
+    persian_gulf_lookup: dict[str, tuple[str | None, object]],
+) -> None:
+    cost_type_column = _find_cost_type_column(df)
+    if cost_type_column is None:
+        return
+
+    pre_cost_columns = _columns_before_cost_type(df)
+    valid_from_column, valid_until_column = _find_date_source_columns(df)
+    shipment_column_order = _shipment_column_order(
+        pre_cost_columns,
+        has_valid_from=valid_from_column is not None,
+        has_valid_until=valid_until_column is not None,
+    )
+    cost_column = _find_cost_column(df)
+    _collect_persian_gulf_surcharges_by_lane_id(
+        df,
+        tab_name=tab_name,
+        cost_type_column=cost_type_column,
+        pre_cost_columns=pre_cost_columns,
+        shipment_column_order=shipment_column_order,
+        valid_from_column=valid_from_column,
+        valid_until_column=valid_until_column,
+        cost_column=cost_column,
+        persian_gulf_lookup=persian_gulf_lookup,
+    )
+
+
+def _parse_lcl_rows_from_tab(
+    tab_name: str,
+    df: pd.DataFrame,
+    *,
+    gst_tab: bool = False,
+    persian_gulf_lookup: dict[str, tuple[str | None, object]] | None = None,
+) -> tuple[list[ParsedLclRow], list[str]]:
     cost_type_column = _find_cost_type_column(df)
     if cost_type_column is None:
         return [], ["Tab Name"]
@@ -432,6 +634,22 @@ def _parse_lcl_rows_from_tab(tab_name: str, df: pd.DataFrame) -> tuple[list[Pars
     )
     cost_column = _find_cost_column(df)
     parsed_rows: list[ParsedLclRow] = []
+    persian_gulf_by_lane_id = (
+        persian_gulf_lookup if persian_gulf_lookup is not None else {}
+    )
+    lane_id_column = _find_lane_id_column(list(df.columns))
+
+    _collect_persian_gulf_surcharges_by_lane_id(
+        df,
+        tab_name=tab_name,
+        cost_type_column=cost_type_column,
+        pre_cost_columns=pre_cost_columns,
+        shipment_column_order=shipment_column_order,
+        valid_from_column=valid_from_column,
+        valid_until_column=valid_until_column,
+        cost_column=cost_column,
+        persian_gulf_lookup=persian_gulf_by_lane_id,
+    )
 
     for _, row in df.iterrows():
         cost_kind = _normalize_cost_type(row.get(cost_type_column))
@@ -448,27 +666,57 @@ def _parse_lcl_rows_from_tab(tab_name: str, df: pd.DataFrame) -> tuple[list[Pars
         )
         currency = row.get("Currency LCL")
         currency_value = None if pd.isna(currency) else str(currency).strip().upper()
-        ets_value = _surcharge_column_value(row, df, ("eu ets",))
-        red_sea_value = _surcharge_column_value(row, df, ("red sea surcharge",))
-        for surcharge_kind, surcharge_value in (
-            ("ets", ets_value),
-            ("red_sea", red_sea_value),
-        ):
-            if surcharge_value is None:
-                continue
+        lane_id = (
+            _normalize_lane_id(row.get(lane_id_column))
+            if lane_id_column is not None
+            else _lane_id_from_shipment_values(shipment_values)
+        )
+
+        if not gst_tab:
+            ets_value = _surcharge_column_value(row, df, ("eu ets",))
+            red_sea_value = _surcharge_column_value(row, df, ("red sea surcharge",))
+            for surcharge_kind, surcharge_value in (
+                ("ets", ets_value),
+                ("red_sea", red_sea_value),
+            ):
+                if surcharge_value is None:
+                    continue
+                parsed_rows.append(
+                    ParsedLclRow(
+                        tab_name=tab_name,
+                        shipment_values=shipment_values,
+                        cost_kind=surcharge_kind,
+                        currency=currency_value,
+                        cost_value=surcharge_value,
+                    )
+                )
+
+        persian_gulf_value = _surcharge_column_value(
+            row,
+            df,
+            ("persian gulf surcharge", "persian gulf"),
+        )
+        persian_gulf_currency = currency_value
+        if persian_gulf_value is None and lane_id is not None:
+            cached = persian_gulf_by_lane_id.get(lane_id)
+            if cached is not None:
+                persian_gulf_currency, persian_gulf_value = cached
+        if persian_gulf_value is not None:
             parsed_rows.append(
                 ParsedLclRow(
                     tab_name=tab_name,
                     shipment_values=shipment_values,
-                    cost_kind=surcharge_kind,
-                    currency=currency_value,
-                    cost_value=surcharge_value,
+                    cost_kind="persian_gulf",
+                    currency=persian_gulf_currency,
+                    cost_value=persian_gulf_value,
                 )
             )
 
     for _, row in df.iterrows():
         cost_kind = _normalize_cost_type(row.get(cost_type_column))
-        if cost_kind is None or cost_kind in {"ets", "red_sea"}:
+        if cost_kind is None or cost_kind in {"ets", "red_sea", "persian_gulf"}:
+            continue
+        if gst_tab and cost_kind not in GST_LCL_ALLOWED_COST_KINDS:
             continue
 
         shipment_values = _build_shipment_values(
@@ -496,18 +744,35 @@ def _parse_lcl_rows_from_tab(tab_name: str, df: pd.DataFrame) -> tuple[list[Pars
     return parsed_rows, shipment_column_order
 
 
-def load_lcl_parsed_rows(selections: list[SubfolderSelection]) -> tuple[list[ParsedLclRow], list[str]]:
+def load_lcl_parsed_rows(
+    selections: list[SubfolderSelection],
+) -> tuple[list[ParsedLclRow], list[str], dict[str, tuple[str | None, object]]]:
     parsed_rows: list[ParsedLclRow] = []
     shipment_columns: list[str] | None = None
+    persian_gulf_by_lane_id: dict[str, tuple[str | None, object]] = {}
 
     for selection in selections:
         if selection.subfolder != INDIVIDUAL_RATE_SUBFOLDER:
             continue
         for tab in selection.tabs:
-            if not is_lcl_rates_tab(tab):
+            if not is_lcl_data_tab(tab):
                 continue
             df = read_lcl_rates_tab_dataframe(selection.file_path, tab)
-            tab_rows, tab_shipment_columns = _parse_lcl_rows_from_tab(tab, df)
+            _collect_persian_gulf_from_tab(tab, df, persian_gulf_by_lane_id)
+
+    for selection in selections:
+        if selection.subfolder != INDIVIDUAL_RATE_SUBFOLDER:
+            continue
+        for tab in selection.tabs:
+            if not is_lcl_data_tab(tab):
+                continue
+            df = read_lcl_rates_tab_dataframe(selection.file_path, tab)
+            tab_rows, tab_shipment_columns = _parse_lcl_rows_from_tab(
+                tab,
+                df,
+                gst_tab=is_gst_lcl_tab(tab),
+                persian_gulf_lookup=persian_gulf_by_lane_id,
+            )
             parsed_rows.extend(tab_rows)
             if shipment_columns is None:
                 shipment_columns = tab_shipment_columns
@@ -516,32 +781,73 @@ def load_lcl_parsed_rows(selections: list[SubfolderSelection]) -> tuple[list[Par
                     if column not in shipment_columns:
                         shipment_columns.append(column)
 
-    return parsed_rows, shipment_columns or ["Tab Name"]
+    return parsed_rows, shipment_columns or ["Tab Name"], persian_gulf_by_lane_id
+
+
+def _read_lcl_tab_from_processing(
+    processing_path: Path,
+    sheet_name: str,
+) -> pd.DataFrame:
+    engine = _read_excel_engine(processing_path)
+    raw = pd.read_excel(processing_path, sheet_name=sheet_name, header=None, engine=engine)
+    header_row = _detect_lcl_rates_header_row(raw)
+    preview = pd.read_excel(
+        processing_path,
+        sheet_name=sheet_name,
+        header=header_row,
+        nrows=0,
+        engine=engine,
+    )
+    preview = normalize_dataframe_columns(preview)
+    converters = line_id_read_converters(list(preview.columns))
+    df = pd.read_excel(
+        processing_path,
+        sheet_name=sheet_name,
+        header=header_row,
+        engine=engine,
+        converters=converters or None,
+    )
+    df = normalize_dataframe_columns(df)
+    return apply_line_id_formatting(df)
 
 
 def load_lcl_parsed_rows_from_processing(
     processing_path: Path,
     selections: list[SubfolderSelection],
-) -> tuple[list[ParsedLclRow], list[str]]:
+) -> tuple[list[ParsedLclRow], list[str], dict[str, tuple[str | None, object]]]:
     parsed_rows: list[ParsedLclRow] = []
     shipment_columns: list[str] | None = None
     workbook = pd.ExcelFile(processing_path)
+    persian_gulf_by_lane_id: dict[str, tuple[str | None, object]] = {}
 
     for selection in selections:
         if selection.subfolder != INDIVIDUAL_RATE_SUBFOLDER:
             continue
         for tab in selection.tabs:
-            if not is_lcl_rates_tab(tab):
+            if not is_lcl_data_tab(tab):
                 continue
             sheet_name = _find_processing_sheet_name(workbook.sheet_names, tab)
             if sheet_name is None:
                 continue
-            raw = pd.read_excel(processing_path, sheet_name=sheet_name, header=None)
-            header_row = _detect_lcl_rates_header_row(raw)
-            df = normalize_dataframe_columns(
-                pd.read_excel(processing_path, sheet_name=sheet_name, header=header_row)
+            df = _read_lcl_tab_from_processing(processing_path, sheet_name)
+            _collect_persian_gulf_from_tab(tab, df, persian_gulf_by_lane_id)
+
+    for selection in selections:
+        if selection.subfolder != INDIVIDUAL_RATE_SUBFOLDER:
+            continue
+        for tab in selection.tabs:
+            if not is_lcl_data_tab(tab):
+                continue
+            sheet_name = _find_processing_sheet_name(workbook.sheet_names, tab)
+            if sheet_name is None:
+                continue
+            df = _read_lcl_tab_from_processing(processing_path, sheet_name)
+            tab_rows, tab_shipment_columns = _parse_lcl_rows_from_tab(
+                tab,
+                df,
+                gst_tab=is_gst_lcl_tab(tab),
+                persian_gulf_lookup=persian_gulf_by_lane_id,
             )
-            tab_rows, tab_shipment_columns = _parse_lcl_rows_from_tab(tab, df)
             parsed_rows.extend(tab_rows)
             if shipment_columns is None:
                 shipment_columns = tab_shipment_columns
@@ -550,7 +856,7 @@ def load_lcl_parsed_rows_from_processing(
                     if column not in shipment_columns:
                         shipment_columns.append(column)
 
-    return parsed_rows, shipment_columns or ["Tab Name"]
+    return parsed_rows, shipment_columns or ["Tab Name"], persian_gulf_by_lane_id
 
 
 def _find_processing_sheet_name(sheet_names: list[str], source_tab: str) -> str | None:
@@ -571,6 +877,7 @@ def build_lcl_rate_card_dataframe(
     shipper: str = "",
     *,
     dhl_origin_port_display: bool = False,
+    persian_gulf_by_lane_id: dict[str, tuple[str | None, object]] | None = None,
 ) -> tuple[pd.DataFrame, list[dict[str, object]], list[str]]:
     grouped: dict[tuple, dict[str, object]] = {}
     tab_names_by_key: dict[tuple, set[str]] = {}
@@ -600,6 +907,13 @@ def build_lcl_rate_card_dataframe(
             costs_by_key[key][parsed_row.cost_kind]["currency"] = parsed_row.currency
         if parsed_row.cost_value is not None:
             costs_by_key[key][parsed_row.cost_kind]["cost"] = parsed_row.cost_value
+
+    _apply_persian_gulf_costs_by_lane_id(
+        parsed_rows,
+        costs_by_key,
+        grouped,
+        persian_gulf_by_lane_id,
+    )
 
     shipment_rows: list[dict[str, object]] = []
     for key in shipment_keys:
@@ -642,7 +956,7 @@ def build_lcl_rate_card_dataframe(
         cost_blocks.append(pd.DataFrame(block_columns))
 
     rate_card_df = pd.concat([shipment_df, *cost_blocks], axis=1)
-    return rate_card_df, column_groups, shipment_columns
+    return apply_line_id_formatting(rate_card_df, shipment_columns), column_groups, shipment_columns
 
 
 def _build_cost_group_meta(group: dict[str, object]) -> dict[str, object]:
@@ -973,6 +1287,12 @@ def _apply_rate_card_formatting(
             cell.font = body_font
             if column_index <= shipment_count:
                 cell.alignment = left
+                if (
+                    column_index <= len(shipment_columns)
+                    and normalize_column_name(shipment_columns[column_index - 1]).lower()
+                    == "line id"
+                ):
+                    cell.number_format = "@"
             elif _is_currency_column(column_index, shipment_count, cost_column_groups):
                 cell.alignment = center
             else:
@@ -1067,6 +1387,15 @@ def _write_rate_card_sheet(
     data_rows = list(dataframe_to_rows(rate_card_df, index=False, header=False))
     for row_offset, row in enumerate(data_rows, start=data_start_row):
         for column_offset, value in enumerate(row, start=1):
+            if (
+                column_offset <= shipment_count
+                and normalize_column_name(shipment_columns[column_offset - 1]).lower()
+                == "line id"
+                and value is not None
+            ):
+                formatted = format_line_id(value)
+                if formatted is not None:
+                    value = str(formatted)
             worksheet.cell(row=row_offset, column=column_offset, value=value)
 
     total_columns = shipment_count + sum(_column_group_width(meta) for meta in column_groups)
@@ -1155,14 +1484,18 @@ def save_lcl_rate_card(
     output_path: Path | None = None,
 ) -> tuple[Path, pd.DataFrame, pd.DataFrame]:
     if processing_path and processing_path.exists():
-        parsed_rows, shipment_columns = load_lcl_parsed_rows_from_processing(
+        parsed_rows, shipment_columns, persian_gulf_by_lane_id = load_lcl_parsed_rows_from_processing(
             processing_path,
             individual_selections,
         )
         if not parsed_rows:
-            parsed_rows, shipment_columns = load_lcl_parsed_rows(individual_selections)
+            parsed_rows, shipment_columns, persian_gulf_by_lane_id = load_lcl_parsed_rows(
+                individual_selections
+            )
     else:
-        parsed_rows, shipment_columns = load_lcl_parsed_rows(individual_selections)
+        parsed_rows, shipment_columns, persian_gulf_by_lane_id = load_lcl_parsed_rows(
+            individual_selections
+        )
 
     if not parsed_rows:
         raise ValueError("No LCL Rate/LCL_Rates rows found in selected individual rate files.")
@@ -1175,6 +1508,7 @@ def save_lcl_rate_card(
         shipment_columns,
         shipper=shipper,
         dhl_origin_port_display=dhl_bre_origin_group,
+        persian_gulf_by_lane_id=persian_gulf_by_lane_id,
     )
     if shipper in LCL_STRUCTURED_CONDITIONS_SHIPPERS:
         conditional_df = build_healthineers_conditions_dataframe(
