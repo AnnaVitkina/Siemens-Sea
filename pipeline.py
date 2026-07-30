@@ -12,6 +12,7 @@ from extractor import build_flow_result_output_path, primary_source_file_for_out
 from glossary_lookup import GlossaryFeeLookup, load_glossary_fee_lookups
 from lcl_rate_card_builder import (
     build_output_rate_card_path as build_lcl_output_rate_card_path,
+    is_lcl_data_tab,
     is_lcl_rates_tab,
     resolve_lcl_carrier_slug,
     save_lcl_rate_card,
@@ -214,16 +215,16 @@ def _validate_lcl_selections(selections: list[SubfolderSelection]) -> list[str]:
 
     has_lcl_rates_tab = False
     for selection in individual:
-        lcl_tabs = [tab for tab in selection.tabs if is_lcl_rates_tab(tab)]
+        lcl_tabs = [tab for tab in selection.tabs if is_lcl_data_tab(tab)]
         if not lcl_tabs:
             errors.append(
-                f"No LCL Rate/LCL_Rates tab selected for individual rate file: {selection.file_path.name}"
+                f"No LCL Rate/LCL_Rates/GST tab selected for individual rate file: {selection.file_path.name}"
             )
         else:
             has_lcl_rates_tab = True
 
     if not has_lcl_rates_tab:
-        errors.append("At least one tab containing LCL Rate or LCL_Rates must be selected.")
+        errors.append("At least one LCL Rate, LCL_Rates, or GST tab must be selected.")
     return errors
 
 
