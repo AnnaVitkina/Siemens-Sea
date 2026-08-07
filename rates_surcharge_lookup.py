@@ -302,7 +302,7 @@ class RatesSurchargeLookup:
 
         return cls(rates_rows, reefer_rows, rates_columns, reefer_columns)
 
-    def _resolve_imo_ets_row(
+    def _resolve_row(
         self,
         line_id: object,
         container_type_code: str,
@@ -321,15 +321,12 @@ class RatesSurchargeLookup:
             return self.reefer_rows.get(normalized_line_id), self.reefer_columns, True
         return self.rates_rows.get(normalized_line_id), self.rates_columns, False
 
-    def _resolve_row(self, line_id: object, container_type_code: str) -> tuple[pd.Series | None, dict[str, str], bool]:
-        normalized_line_id = _normalize_line_id(line_id)
-        if not normalized_line_id:
-            return None, {}, False
-
-        use_reefer = normalized_line_id.startswith("R") or _is_rf_container(container_type_code)
-        if use_reefer:
-            return self.reefer_rows.get(normalized_line_id), self.reefer_columns, True
-        return self.rates_rows.get(normalized_line_id), self.rates_columns, False
+    def _resolve_imo_ets_row(
+        self,
+        line_id: object,
+        container_type_code: str,
+    ) -> tuple[pd.Series | None, dict[str, str], bool]:
+        return self._resolve_row(line_id, container_type_code)
 
     def lookup_imo(self, line_id: object, container_type_code: str) -> float | None:
         row, columns, _reefer_sheet = self._resolve_imo_ets_row(line_id, container_type_code)
