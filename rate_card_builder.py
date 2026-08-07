@@ -413,9 +413,21 @@ def _lookup_thc_series(
         currency = currency_series.iloc[index]
         value = thc_lookup.lookup(country, container_type, currency)
         if value is not None:
-            value = -abs(float(value))
-        values.append(_normalize_number(value))
+            value = _normalize_number(float(value))
+        values.append(value)
     return pd.Series(values)
+
+
+def _negate_thc_cost_series(series: pd.Series) -> pd.Series:
+    def negate(value: object) -> object:
+        if _is_empty_rate_card_value(value):
+            return value
+        try:
+            return _normalize_number(-abs(float(value)))
+        except (TypeError, ValueError):
+            return value
+
+    return series.apply(negate)
 
 
 def _lookup_surcharge_columns(
@@ -693,6 +705,9 @@ def build_rate_card_dataframe(
             thc_inbound_series = pd.Series([None] * len(shipment_df))
         if not _series_has_values(thc_outbound_series):
             thc_outbound_series = pd.Series([None] * len(shipment_df))
+        if not use_othc_dthc_labels:
+            thc_inbound_series = _negate_thc_cost_series(thc_inbound_series)
+            thc_outbound_series = _negate_thc_cost_series(thc_outbound_series)
 
         imo_cost_fallback = _optional_pivot_series(
             prepared,
