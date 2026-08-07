@@ -350,27 +350,21 @@ def _build_surcharge_column_groups(
 ) -> list[dict[str, str]]:
     column_groups: list[dict[str, str]] = []
     for container_type in container_types:
-        rf_apply_if = (
-            IMO_ETS_RF_CONTAINER_APPLY_IF if _is_rf_container(container_type) else ""
-        )
         column_groups.append(
             {
                 "container_type": container_type,
                 "cost_name": _imo_charges_column_name(container_type),
-                "apply_if": rf_apply_if,
+                "apply_if": _combine_surcharge_apply_if("", container_type),
                 "rate_by": _thc_rate_by_value(container_type),
                 "rate_type": "p/unit",
             }
         )
     for container_type in container_types:
-        rf_apply_if = (
-            IMO_ETS_RF_CONTAINER_APPLY_IF if _is_rf_container(container_type) else ""
-        )
         column_groups.append(
             {
                 "container_type": container_type,
                 "cost_name": _ets_fee_column_name(container_type),
-                "apply_if": rf_apply_if,
+                "apply_if": _combine_surcharge_apply_if("", container_type),
                 "rate_by": _thc_rate_by_value(container_type),
                 "rate_type": "p/unit",
             }
@@ -387,7 +381,7 @@ def _build_surcharge_column_groups(
                         variant["cost_label"],
                         container_type,
                     ),
-                    "apply_if": apply_if,
+                    "apply_if": _combine_surcharge_apply_if(apply_if, container_type),
                     "rate_by": _thc_rate_by_value(container_type),
                     "rate_type": "p/unit",
                 }
@@ -397,7 +391,7 @@ def _build_surcharge_column_groups(
             {
                 "container_type": container_type,
                 "cost_name": _wrs_column_name(container_type),
-                "apply_if": "",
+                "apply_if": _combine_surcharge_apply_if("", container_type),
                 "rate_by": _thc_rate_by_value(container_type),
                 "rate_type": "p/unit",
             }
@@ -458,7 +452,15 @@ def _lookup_surcharge_columns(
     return pd.Series(currencies), pd.Series(costs)
 
 
-def _mask_imo_ets_for_reefer_lanes(
+def _combine_surcharge_apply_if(base_apply_if: str, container_type: str) -> str:
+    if not _is_rf_container(container_type):
+        return base_apply_if
+    if base_apply_if:
+        return f"{base_apply_if}; {IMO_ETS_RF_CONTAINER_APPLY_IF}"
+    return IMO_ETS_RF_CONTAINER_APPLY_IF
+
+
+def _mask_rf_lane_surcharges_for_non_rf_containers(
     shipment_df: pd.DataFrame,
     container_type: str,
     cost_series: pd.Series,
@@ -534,7 +536,11 @@ def _apply_flow_column_group_overrides(
 
     apply_if = build_all_carriers_apply_if(shipper, flow=profile.flow)
     for group in column_groups:
-        group["apply_if"] = apply_if
+        container_type = group.get("container_type")
+        if container_type:
+            group["apply_if"] = _combine_surcharge_apply_if(apply_if, str(container_type))
+        else:
+            group["apply_if"] = apply_if
         if profile.multiplier_label:
             group["multiplier_label"] = profile.multiplier_label
 
@@ -702,7 +708,7 @@ def build_rate_card_dataframe(
         )
         imo_cost = _fallback_when_empty(imo_cost, imo_cost_fallback)
         imo_currency = _fallback_when_empty(imo_currency, imo_currency_fallback)
-        imo_currency, imo_cost = _mask_imo_ets_for_reefer_lanes(
+        imo_currency, imo_cost = _mask_rf_lane_surcharges_for_non_rf_containers(
             shipment_df,
             container_type,
             imo_cost,
@@ -721,11 +727,23 @@ def build_rate_card_dataframe(
         )
         ets_cost = _fallback_when_empty(ets_cost, ets_cost_fallback)
         ets_currency = _fallback_when_empty(ets_currency, ets_currency_fallback)
-        ets_currency, ets_cost = _mask_imo_ets_for_reefer_lanes(
+        ets_currency, ets_cost = _mask_rf_lane_surcharges_for_non_rf_containers(
             shipment_df,
             container_type,
             ets_cost,
             ets_currency,
+        )
+        ebs_currency, ebs_cost = _mask_rf_lane_surcharges_for_non_rf_containers(
+            shipment_df,
+            container_type,
+            ebs_cost,
+            ebs_currency,
+        )
+        wrs_currency, wrs_cost = _mask_rf_lane_surcharges_for_non_rf_containers(
+            shipment_df,
+            container_type,
+            wrs_cost,
+            wrs_currency,
         )
         transport_thc_blocks.append(
             pd.DataFrame(
@@ -905,6 +923,8 @@ def _fcl_lane_merge_group_key(
 
 
 def _rate_card_values_equal(left: object, right: object) -> bool:
+    if _is_empty_rate_card_value(left) and _is_empty_rate_card_value(right):
+        return True
     if _is_empty_rate_card_value(left) or _is_empty_rate_card_value(right):
         return False
     try:
@@ -976,18 +996,24 @@ def _merge_fcl_compatible_lanes(
     if not merge_key_columns:
         return rate_card_df
 
+    working_df = rate_card_df.copy()
+    if "Line ID" in working_df.columns:
+        working_df["Line ID"] = working_df["Line ID"].apply(
+            lambda value: _normalize_fcl_line_id_for_merge(value) or value
+        )
+
     shipment_column_set = set(shipment_columns)
-    cost_columns = [column for column in rate_card_df.columns if column not in shipment_column_set]
+    cost_columns = [column for column in working_df.columns if column not in shipment_column_set]
     optional_shipment_columns = [
         column for column in shipment_columns if column not in merge_key_columns
     ]
 
     grouped_rows: list[pd.Series] = []
-    group_keys = rate_card_df.apply(
+    group_keys = working_df.apply(
         lambda row: _fcl_lane_merge_group_key(row, merge_key_columns),
         axis=1,
     )
-    for group_key, group_df in rate_card_df.groupby(group_keys, sort=False):
+    for group_key, group_df in working_df.groupby(group_keys, sort=False):
         if not str(group_key).strip():
             grouped_rows.extend(group_df.iloc[index] for index in range(len(group_df)))
             continue
@@ -998,7 +1024,7 @@ def _merge_fcl_compatible_lanes(
         )
         grouped_rows.extend(merged_group_rows)
 
-    return pd.DataFrame(grouped_rows, columns=rate_card_df.columns).reset_index(drop=True)
+    return pd.DataFrame(grouped_rows, columns=working_df.columns).reset_index(drop=True)
 
 
 def _apply_rate_card_formatting(
