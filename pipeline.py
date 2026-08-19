@@ -20,6 +20,7 @@ from lcl_rate_card_builder import (
 from preon_carriage_builder import save_preon_generic_rate_card, save_preon_per_carrier_rate_card
 from preon_carriage_builder import (
     PREON_DIESELFLOATER_TAB,
+    PREON_GENERIC_ADD_SERVICES_TABS,
     build_output_rate_card_path as build_preon_output_rate_card_path,
     resolve_preon_carrier_slug,
 )
@@ -97,155 +98,135 @@ def validate_rate_card_selections(
     shipper: str,
     underflow: str | None = None,
 ) -> list[str]:
-    """Return validation errors for rate card build."""
+    """Return hard validation errors that prevent running an unsupported flow."""
+    del selections, underflow  # Tab and selection gaps are handled as warnings.
+
+    errors: list[str] = []
     if flow not in RATE_CARD_REQUIRED_TABS_BY_FLOW:
-        return [f"Flow '{flow}' is not implemented yet."]
-
-    if flow == "LCL":
-        return _validate_lcl_selections(selections)
-    if flow == "Pre/on carriage":
-        return _validate_preon_selections(selections, underflow=underflow)
-    if flow == "Haulage":
-        return _validate_haulage_selections(selections, shipper=shipper)
-
-    shared, individual = split_selections(selections)
-    selected = _selected_tabs(shared)
-    errors: list[str] = []
-    required_tabs = RATE_CARD_REQUIRED_TABS_BY_FLOW[flow]
-    if _main_rates_optional_supplements(shipper, flow):
-        required_tabs = tuple(tab for tab in required_tabs if tab != "FCL_THC")
-    for tab in required_tabs:
-        if tab not in selected:
-            errors.append(f"Missing required tab: {tab}")
-    if not individual and not _main_rates_optional_supplements(shipper, flow):
-        errors.append("At least one individual rate file must be selected.")
-    for selection in individual:
-        carrier_key = detect_carrier_key(
-            selection.file_path.name,
-            shipper=shipper,
-            flow=flow,
-        )
-        if not carrier_key:
-            errors.append(
-                f"Could not detect carrier from individual rate file: {selection.file_path.name}"
-            )
-    return errors
-
-
-def _validate_preon_selections(
-    selections: list[SubfolderSelection],
-    underflow: str | None = None,
-) -> list[str]:
-    errors: list[str] = []
-    if underflow == "generic":
-        main_rates = [s for s in selections if s.subfolder == "main rates"]
-        if not main_rates:
-            errors.append("Main rates file must be selected for Pre/on carriage generic.")
-            return errors
-
-        required_tabs = {
-            "PreOnCarriage_Containerized_EU",
-            "DIGI_FCL_Rates",
-            "HAPAG_Terms & Conditions",
-            "MAERSK_Terms & Condition",
-            "MSC_Terms & Conditions",
-            "ONE_Terms & Conditions",
-        }
-        add_services_aliases = {
-            "Add_Services_Glomb_Br. Hafenb",
-            "Add_Services_Glomb_Br. Hafenb.",
-        }
-        for selection in main_rates:
-            missing = required_tabs.difference(selection.tabs)
-            if not any(tab in selection.tabs for tab in add_services_aliases):
-                missing.add("Add_Services_Glomb_Br. Hafenb")
-            if missing:
-                errors.append(
-                    f"{selection.file_path.name} is missing required tabs: {', '.join(sorted(missing))}"
-                )
-        return errors
-
-    individual = [s for s in selections if s.subfolder == INDIVIDUAL_RATE_SUBFOLDER]
-    if not individual:
-        errors.append("At least one individual rate file must be selected for Pre/on carriage.")
-        return errors
-
-    required_tabs = {"Pre-On-Carriage_RoW", "Glossary"}
-    for selection in individual:
-        missing = required_tabs.difference(selection.tabs)
-        if missing:
-            errors.append(
-                f"{selection.file_path.name} is missing required tabs: {', '.join(sorted(missing))}"
-            )
-    return errors
-
-
-def _validate_haulage_selections(
-    selections: list[SubfolderSelection],
-    *,
-    shipper: str,
-) -> list[str]:
-    errors: list[str] = []
-    if shipper != "Siemens Healthineers":
+        errors.append(f"Flow '{flow}' is not implemented yet.")
+    if flow == "Haulage" and shipper != "Siemens Healthineers":
         errors.append("Haulage flow is implemented only for Siemens Healthineers.")
-        return errors
-    main_rates = [s for s in selections if s.subfolder == "main rates"]
-    if not main_rates:
-        errors.append("Main rates file must be selected for Haulage.")
-        return errors
-    required_tabs = {
-        "PreOn_Carriage_Car. Haulage",
-        "PreOn_Containerized_EU_Services",
-    }
-    for selection in main_rates:
-        missing = required_tabs.difference(selection.tabs)
-        if missing:
-            errors.append(
-                f"{selection.file_path.name} is missing required tabs: {', '.join(sorted(missing))}"
-            )
     return errors
 
 
-def _validate_lcl_selections(selections: list[SubfolderSelection]) -> list[str]:
-    errors: list[str] = []
-    individual = [selection for selection in selections if selection.subfolder == INDIVIDUAL_RATE_SUBFOLDER]
-    if not individual:
-        errors.append("At least one individual rate file must be selected for LCL.")
-        return errors
-
-    has_lcl_rates_tab = False
-    for selection in individual:
-        lcl_tabs = [tab for tab in selection.tabs if is_lcl_data_tab(tab)]
-        if not lcl_tabs:
-            errors.append(
-                f"No LCL Rate/LCL_Rates/GST tab selected for individual rate file: {selection.file_path.name}"
-            )
-        else:
-            has_lcl_rates_tab = True
-
-    if not has_lcl_rates_tab:
-        errors.append("At least one LCL Rate, LCL_Rates, or GST tab must be selected.")
-    return errors
-
-
-def validate_fcl_selections(
-    selections: list[SubfolderSelection],
-    shipper: str,
+def _warn_missing_tabs(
+    selection: SubfolderSelection,
+    required_tabs: set[str],
+    *,
+    consequence: str,
 ) -> list[str]:
-    return validate_rate_card_selections("FCL", selections, shipper)
+    warnings: list[str] = []
+    for tab in sorted(required_tabs.difference(selection.tabs)):
+        warnings.append(
+            f"Tab '{tab}' not selected for {selection.file_path.name} — {consequence}"
+        )
+    return warnings
 
 
 def warn_rate_card_selections(
     selections: list[SubfolderSelection],
     flow: str = "FCL",
+    underflow: str | None = None,
+    shipper: str | None = None,
 ) -> list[str]:
-    if flow == "LCL":
+    if flow not in RATE_CARD_REQUIRED_TABS_BY_FLOW:
         return []
 
     warnings: list[str] = []
-    _, individual = split_selections(selections)
-    if flow == "Pre/on carriage":
+    shared, individual = split_selections(selections)
+
+    if flow in {"FCL", "BCN"}:
+        selected = _selected_tabs(shared)
+        for tab in RATE_CARD_REQUIRED_TABS_BY_FLOW[flow]:
+            if tab not in selected:
+                consequence = {
+                    "DIGI_FCL_Rates": "transport and base lane data will be omitted.",
+                    "Rates": "standard-container surcharges may be omitted.",
+                    "Rates_Reefer_Containers": "reefer surcharges may be omitted.",
+                    "FCL_THC": "THC lookup values will be omitted (DIGI fallback may still apply).",
+                }.get(tab, "related rate card columns may be omitted.")
+                warnings.append(f"Tab '{tab}' not selected — {consequence}")
+        if not individual and not _main_rates_optional_supplements(shipper or "", flow):
+            warnings.append(
+                "No individual rate file selected — TMP Fee, Financing Fee, "
+                "and related accessorial columns will be omitted."
+            )
         for selection in individual:
+            if GLOSSARY_TAB not in selection.tabs:
+                warnings.append(
+                    f"Tab '{GLOSSARY_TAB}' not selected for {selection.file_path.name} — "
+                    "TMP Fee and Financing Fee columns will be omitted."
+                )
+            carrier_key = detect_carrier_key(
+                selection.file_path.name,
+                shipper=shipper,
+                flow=flow,
+            )
+            if not carrier_key:
+                warnings.append(
+                    f"Could not detect carrier from individual rate file "
+                    f"{selection.file_path.name} — glossary-based columns may be omitted."
+                )
+        return warnings
+
+    if flow == "Pre/on carriage":
+        if underflow == "generic":
+            main_rates = [selection for selection in shared if selection.subfolder == "main rates"]
+            if not main_rates:
+                warnings.append(
+                    "No main rates file selected — generic Pre/on carriage build may fail."
+                )
+            required_tabs = {
+                "PreOnCarriage_Containerized_EU",
+                "PreOn_Containerized_EU_Services",
+                "DIGI_FCL_Rates",
+                "HAPAG_Terms & Conditions",
+                "MAERSK_Terms & Condition",
+                "MSC_Terms & Conditions",
+                "ONE_Terms & Conditions",
+            }
+            tab_consequences = {
+                "PreOnCarriage_Containerized_EU": "generic transport rows will be omitted.",
+                "PreOn_Containerized_EU_Services": "IMO, positioning, T1, and waiting-fee columns may be omitted.",
+                "DIGI_FCL_Rates": "THC Origin columns may be omitted.",
+                "HAPAG_Terms & Conditions": "HLCU terms accessorial rows may be omitted.",
+                "MAERSK_Terms & Condition": "MAEU terms accessorial rows may be omitted.",
+                "MSC_Terms & Conditions": "MSCU terms accessorial rows may be omitted.",
+                "ONE_Terms & Conditions": "ONEY terms accessorial rows may be omitted.",
+            }
+            for selection in main_rates:
+                for tab in sorted(required_tabs.difference(selection.tabs)):
+                    consequence = tab_consequences.get(
+                        tab,
+                        "related Pre/on carriage columns may be omitted.",
+                    )
+                    warnings.append(
+                        f"Tab '{tab}' not selected for {selection.file_path.name} — {consequence}"
+                    )
+                if not any(tab in selection.tabs for tab in PREON_GENERIC_ADD_SERVICES_TABS):
+                    warnings.append(
+                        f"No Add Services tab selected for {selection.file_path.name} — "
+                        "additional services accessorial costs will be omitted."
+                    )
+            return warnings
+
+        if not individual:
+            warnings.append(
+                "No individual rate file selected — per-carrier Pre/on carriage build may fail."
+            )
+        for selection in individual:
+            warnings.extend(
+                _warn_missing_tabs(
+                    selection,
+                    {"Pre-On-Carriage_RoW"},
+                    consequence="Pre/on carriage transport rows will be omitted.",
+                )
+            )
+            if GLOSSARY_TAB not in selection.tabs:
+                warnings.append(
+                    f"Tab '{GLOSSARY_TAB}' not selected for {selection.file_path.name} — "
+                    "TMP Fee accessorial rows may be omitted."
+                )
             if PREON_DIESELFLOATER_TAB not in selection.tabs:
                 warnings.append(
                     f"Tab '{PREON_DIESELFLOATER_TAB}' not selected for {selection.file_path.name} — "
@@ -253,17 +234,50 @@ def warn_rate_card_selections(
                 )
         return warnings
 
-    for selection in individual:
-        if GLOSSARY_TAB not in selection.tabs:
-            warnings.append(
-                f"Tab '{GLOSSARY_TAB}' not selected for {selection.file_path.name} — "
-                "TMP Fee and Financing Fee columns will be omitted."
+    if flow == "Haulage":
+        main_rates = [selection for selection in shared if selection.subfolder == "main rates"]
+        if not main_rates:
+            warnings.append("No main rates file selected — Haulage build may fail.")
+        for selection in main_rates:
+            warnings.extend(
+                _warn_missing_tabs(
+                    selection,
+                    {
+                        "PreOn_Carriage_Car. Haulage",
+                        "PreOn_Containerized_EU_Services",
+                    },
+                    consequence="related Haulage columns may be omitted.",
+                )
             )
+        return warnings
+
+    if flow == "LCL":
+        if not individual:
+            warnings.append("No individual rate file selected — LCL build may fail.")
+        has_lcl_rates_tab = False
+        for selection in individual:
+            lcl_tabs = [tab for tab in selection.tabs if is_lcl_data_tab(tab)]
+            if not lcl_tabs:
+                warnings.append(
+                    f"No LCL Rate/LCL_Rates/GST tab selected for {selection.file_path.name} — "
+                    "LCL rate rows will be omitted."
+                )
+            else:
+                has_lcl_rates_tab = True
+        if individual and not has_lcl_rates_tab:
+            warnings.append(
+                "No LCL Rate, LCL_Rates, or GST tab selected — LCL build may fail."
+            )
+        return warnings
+
     return warnings
 
 
-def warn_fcl_selections(selections: list[SubfolderSelection]) -> list[str]:
-    return warn_rate_card_selections(selections)
+def warn_fcl_selections(
+    selections: list[SubfolderSelection],
+    shipper: str | None = None,
+) -> list[str]:
+    return warn_rate_card_selections(selections, flow="FCL", shipper=shipper)
 
 
 def run_extraction(
