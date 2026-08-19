@@ -225,6 +225,10 @@ def _normalize_text(value: object) -> str:
     return text
 
 
+def _normalize_column_name(column: object) -> str:
+    return re.sub(r"\s+", " ", str(column).replace("\n", " ")).strip()
+
+
 def _ltl_apply_if(max_weight: object, min_weight_excluded: object | None = None) -> str:
     parts = ["Equipment Type equals 'LTL/STANDARD'"]
     if max_weight is not None:
@@ -840,7 +844,7 @@ def _shipment_row_from_source_row_generic(
     for col in shipment_columns:
         source_col = "Supplier" if col == "Forwarded" else col
         value = row.get(source_col)
-        if normalize_column_name(col).lower() in {"valid from", "valid to", "valid until"}:
+        if _normalize_column_name(col).lower() in {"valid from", "valid to", "valid until"}:
             value = format_dd_mm_yyyy(value)
         values[col] = value
     return values
