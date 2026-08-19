@@ -210,8 +210,6 @@ FLOW_TAB_PRESETS = {
             "PreOnCarriage_Containerized_EU",
             "PreOn_Containerized_EU_Services",
             "DIGI_FCL_Rates",
-            "Add_Services_Glomb_Br. Hafenb",
-            "Add_Services_Glomb_Br. Hafenb.",
             "HAPAG_Terms & Conditions",
             "MAERSK_Terms & Condition",
             "MSC_Terms & Conditions",
@@ -244,6 +242,10 @@ FLOW_OPTIONAL_TABS = {
         "individual rate": [],
     },
     "Pre/on carriage": {
+        "main rates": [
+            "Add_Services_Glomb_Br. Hafenb",
+            "Add_Services_Glomb_Br. Hafenb.",
+        ],
         "individual rate": [],
     },
 }
