@@ -112,6 +112,33 @@ def _normalize_number(value: object) -> object:
     return number
 
 
+def _preon_cost_value_present(value: object) -> bool:
+    if value is None or pd.isna(value):
+        return False
+    if isinstance(value, str) and not value.strip():
+        return False
+    return True
+
+
+def _preon_currency_for_row(
+    currency: object,
+    rate_val: object,
+    min_val: object,
+    max_val: object,
+    *,
+    include_min: bool,
+    include_max: bool,
+) -> object:
+    has_cost = _preon_cost_value_present(rate_val)
+    if include_min and _preon_cost_value_present(min_val):
+        has_cost = True
+    if include_max and _preon_cost_value_present(max_val):
+        has_cost = True
+    if not has_cost:
+        return None
+    return currency
+
+
 def _number_format(value: object) -> str:
     if isinstance(value, (int, float)) and float(value).is_integer():
         return "0"
@@ -945,6 +972,14 @@ def save_preon_per_carrier_rate_card(
         maxes: list[object] = []
         for key in sorted_row_keys:
             ccy, min_val, rate_val, max_val = costs_by_row.get(key, {}).get(group.key, (None, None, None, None))
+            ccy = _preon_currency_for_row(
+                ccy,
+                rate_val,
+                min_val,
+                max_val,
+                include_min=group.include_min,
+                include_max=group.include_max,
+            )
             currencies.append(ccy)
             if group.include_min:
                 mins.append(min_val)
@@ -952,13 +987,11 @@ def save_preon_per_carrier_rate_card(
             if group.include_max:
                 maxes.append(max_val)
 
-        has_any_value = any(value is not None for value in currencies) or any(
-            value is not None for value in rates
-        )
+        has_any_value = any(_preon_cost_value_present(value) for value in rates)
         if group.include_min:
-            has_any_value = has_any_value or any(value is not None for value in mins)
+            has_any_value = has_any_value or any(_preon_cost_value_present(value) for value in mins)
         if group.include_max:
-            has_any_value = has_any_value or any(value is not None for value in maxes)
+            has_any_value = has_any_value or any(_preon_cost_value_present(value) for value in maxes)
         if not has_any_value:
             continue
 
@@ -1319,6 +1352,14 @@ def save_preon_generic_rate_card(
         maxes: list[object] = []
         for key in sorted_row_keys:
             ccy, min_val, rate_val, max_val = costs_by_row.get(key, {}).get(group.key, (None, None, None, None))
+            ccy = _preon_currency_for_row(
+                ccy,
+                rate_val,
+                min_val,
+                max_val,
+                include_min=group.include_min,
+                include_max=group.include_max,
+            )
             currencies.append(ccy)
             if group.include_min:
                 mins.append(min_val)
@@ -1326,13 +1367,11 @@ def save_preon_generic_rate_card(
             if group.include_max:
                 maxes.append(max_val)
 
-        has_any_value = any(value is not None for value in currencies) or any(
-            value is not None for value in rates
-        )
+        has_any_value = any(_preon_cost_value_present(value) for value in rates)
         if group.include_min:
-            has_any_value = has_any_value or any(value is not None for value in mins)
+            has_any_value = has_any_value or any(_preon_cost_value_present(value) for value in mins)
         if group.include_max:
-            has_any_value = has_any_value or any(value is not None for value in maxes)
+            has_any_value = has_any_value or any(_preon_cost_value_present(value) for value in maxes)
         if not has_any_value:
             continue
 
