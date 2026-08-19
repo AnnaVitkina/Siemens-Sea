@@ -243,6 +243,22 @@ def _container_type_sort_key(container_type_code: str) -> tuple:
     return size, str(container_type_code)
 
 
+def _is_empty_rate_card_value(value: object) -> bool:
+    if value is None or pd.isna(value):
+        return True
+    if isinstance(value, str) and not value.strip():
+        return True
+    return False
+
+
+def _mask_currency_without_cost(
+    currency_series: pd.Series,
+    cost_series: pd.Series,
+) -> pd.Series:
+    cost_present = ~cost_series.apply(_is_empty_rate_card_value)
+    return currency_series.where(cost_present, None)
+
+
 def _measurement_type(line_id: object) -> str:
     if pd.isna(line_id):
         return "Not Reefer"
@@ -760,18 +776,22 @@ def build_rate_card_dataframe(
             wrs_cost,
             wrs_currency,
         )
+        transport_currency = _mask_currency_without_cost(currency_series, cost_series)
+        thc_in_currency = _mask_currency_without_cost(currency_series, thc_inbound_series)
+        thc_out_currency = _mask_currency_without_cost(currency_series, thc_outbound_series)
         transport_thc_blocks.append(
             pd.DataFrame(
                 {
-                    f"{container_type}__transport_currency": currency_series,
+                    f"{container_type}__transport_currency": transport_currency,
                     f"{container_type}__transport_cost": cost_series,
-                    f"{container_type}__thc_in_currency": currency_series,
+                    f"{container_type}__thc_in_currency": thc_in_currency,
                     f"{container_type}__thc_in_cost": thc_inbound_series,
-                    f"{container_type}__thc_out_currency": currency_series,
+                    f"{container_type}__thc_out_currency": thc_out_currency,
                     f"{container_type}__thc_out_cost": thc_outbound_series,
                 }
             )
         )
+        imo_currency = _mask_currency_without_cost(imo_currency, imo_cost)
         imo_blocks.append(
             pd.DataFrame(
                 {
@@ -780,6 +800,7 @@ def build_rate_card_dataframe(
                 }
             )
         )
+        ets_currency = _mask_currency_without_cost(ets_currency, ets_cost)
         ets_blocks.append(
             pd.DataFrame(
                 {
@@ -791,14 +812,16 @@ def build_rate_card_dataframe(
 
         for variant in ebs_variants:
             variant_key = variant["key"]
+            ebs_currency_masked = _mask_currency_without_cost(ebs_currency, ebs_cost)
             ebs_variant_blocks[variant_key].append(
                 pd.DataFrame(
                     {
-                        f"{container_type}__ebs_{variant_key}_currency": ebs_currency,
+                        f"{container_type}__ebs_{variant_key}_currency": ebs_currency_masked,
                         f"{container_type}__ebs_{variant_key}_cost": ebs_cost,
                     }
                 )
             )
+        wrs_currency = _mask_currency_without_cost(wrs_currency, wrs_cost)
         wrs_blocks.append(
             pd.DataFrame(
                 {
@@ -908,14 +931,6 @@ def _fcl_duplicate_lane_flags(shipment_df: pd.DataFrame, shipment_columns: tuple
 
 
 FCL_LANE_MERGE_KEY_COLUMNS = ("Line ID",)
-
-
-def _is_empty_rate_card_value(value: object) -> bool:
-    if value is None or pd.isna(value):
-        return True
-    if isinstance(value, str) and not value.strip():
-        return True
-    return False
 
 
 def _normalize_fcl_line_id_for_merge(value: object) -> str:
