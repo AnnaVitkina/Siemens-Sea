@@ -222,7 +222,11 @@ def build_innomotics_rate_card_dataframe(selections: list[SubfolderSelection]) -
         rates: list[object] = []
         for key in sorted_keys:
             currency, value = costs_by_row.get(key, {}).get(group.key, ("", None))
-            currencies.append(currency)
+            if value is None or (isinstance(value, float) and pd.isna(value)):
+                currencies.append(None)
+                rates.append(None)
+                continue
+            currencies.append(currency or None)
             rates.append(value)
         if not any(v is not None for v in rates):
             continue
