@@ -90,10 +90,15 @@ def main() -> int:
 
     if flow in IMPLEMENTED_FLOWS:
         errors = validate_rate_card_selections(flow, selections, shipper, underflow=underflow)
-        for warning in warn_rate_card_selections(selections, flow=flow):
+        for warning in warn_rate_card_selections(
+            selections,
+            flow=flow,
+            underflow=underflow,
+            shipper=shipper,
+        ):
             print(f"\nWarning: {warning}")
         if errors:
-            print("\nCannot continue — missing required tabs:")
+            print("\nCannot continue:")
             for error in errors:
                 print(f"  - {error}")
             return 1
