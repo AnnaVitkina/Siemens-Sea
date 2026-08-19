@@ -899,14 +899,13 @@ def build_lcl_rate_card_dataframe(
                 if pd.isna(grouped[key].get(column)) and not pd.isna(value):
                     grouped[key][column] = value
 
-        if parsed_row.cost_value is None and parsed_row.currency is None:
+        if parsed_row.cost_value is None:
             continue
 
         costs_by_key[key].setdefault(parsed_row.cost_kind, {})
         if parsed_row.currency is not None:
             costs_by_key[key][parsed_row.cost_kind]["currency"] = parsed_row.currency
-        if parsed_row.cost_value is not None:
-            costs_by_key[key][parsed_row.cost_kind]["cost"] = parsed_row.cost_value
+        costs_by_key[key][parsed_row.cost_kind]["cost"] = parsed_row.cost_value
 
     _apply_persian_gulf_costs_by_lane_id(
         parsed_rows,
@@ -936,8 +935,14 @@ def build_lcl_rate_card_dataframe(
         p_units: list[object] = []
         for key in shipment_keys:
             costs = costs_by_key.get(key, {}).get(group["key"], {})
-            currencies.append(costs.get("currency"))
             cost_value = costs.get("cost")
+            if cost_value is None or (isinstance(cost_value, float) and pd.isna(cost_value)):
+                currencies.append(None)
+                if group["include_flat_min"]:
+                    flat_mins.append(None)
+                p_units.append(None)
+                continue
+            currencies.append(costs.get("currency"))
             if group["include_flat_min"]:
                 flat_mins.append(cost_value)
             p_unit_value = cost_value
