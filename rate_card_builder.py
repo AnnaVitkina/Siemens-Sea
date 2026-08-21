@@ -273,13 +273,42 @@ def _resolve_thc_currency_series(
     cost_series: pd.Series,
     thc_currency_series: pd.Series | None,
     freight_currency_series: pd.Series,
+    *fallback_currency_series: pd.Series | None,
 ) -> pd.Series:
     currency = freight_currency_series.copy()
     if thc_currency_series is not None:
         thc_currency = thc_currency_series.reset_index(drop=True)
         has_thc_currency = ~thc_currency.apply(_is_empty_rate_card_value)
         currency = thc_currency.where(has_thc_currency, currency)
+    for fallback in fallback_currency_series:
+        if fallback is None:
+            continue
+        fallback_currency = fallback.reset_index(drop=True)
+        missing = currency.apply(_is_empty_rate_card_value)
+        currency = currency.where(~missing, fallback_currency)
     return _mask_currency_without_cost(currency, cost_series)
+
+
+def _resolve_transport_currency_series(
+    cost_series: pd.Series,
+    freight_currency_series: pd.Series,
+    *fallback_currency_series: pd.Series | None,
+) -> pd.Series:
+    currency = freight_currency_series.copy()
+    for fallback in fallback_currency_series:
+        if fallback is None:
+            continue
+        fallback_currency = fallback.reset_index(drop=True)
+        missing = currency.apply(_is_empty_rate_card_value)
+        currency = currency.where(~missing, fallback_currency)
+    return _mask_currency_without_cost(currency, cost_series)
+
+
+def _mask_series_without_transport(
+    series: pd.Series,
+    transport_present: pd.Series,
+) -> pd.Series:
+    return series.where(transport_present, None)
 
 
 def _measurement_type(line_id: object) -> str:
@@ -438,23 +467,58 @@ def _build_surcharge_column_groups(
     return column_groups
 
 
+def _normalize_lookup_currency(value: object) -> str | None:
+    if _is_empty_rate_card_value(value):
+        return None
+    currency_code = str(value).strip().upper()
+    return currency_code if currency_code in {"EUR", "USD"} else None
+
+
+def _lookup_thc_value_with_currency(
+    thc_lookup: FclThcLookup,
+    country: object,
+    container_type: str,
+    preferred_currency: object,
+) -> tuple[float | None, str | None]:
+    preferred_code = _normalize_lookup_currency(preferred_currency)
+    if preferred_code is not None:
+        value = thc_lookup.lookup(country, container_type, preferred_code)
+        if value is not None:
+            return value, preferred_code
+
+    for currency_code in ("EUR", "USD"):
+        if currency_code == preferred_code:
+            continue
+        value = thc_lookup.lookup(country, container_type, currency_code)
+        if value is not None:
+            return value, currency_code
+    return None, None
+
+
 def _lookup_thc_series(
     shipment_df: pd.DataFrame,
     container_type: str,
     currency_series: pd.Series,
     thc_lookup: FclThcLookup,
     direction: str,
-) -> pd.Series:
+) -> tuple[pd.Series, pd.Series]:
     country_column = "Origin Country" if direction == "inbound" else "Destination Country"
     values: list[object] = []
+    currencies: list[object] = []
     for index in range(len(shipment_df)):
         country = shipment_df.iloc[index][country_column]
         currency = currency_series.iloc[index]
-        value = thc_lookup.lookup(country, container_type, currency)
+        value, lookup_currency = _lookup_thc_value_with_currency(
+            thc_lookup,
+            country,
+            container_type,
+            currency,
+        )
         if value is not None:
             value = _normalize_number(float(value))
         values.append(value)
-    return pd.Series(values)
+        currencies.append(lookup_currency)
+    return pd.Series(values), pd.Series(currencies)
 
 
 def _negate_thc_cost_series(series: pd.Series) -> pd.Series:
@@ -533,6 +597,7 @@ def _optional_pivot_series(
     lane_columns: list[str],
     container_type: str,
     value_column: str,
+    lane_index: pd.Index | None = None,
 ) -> pd.Series | None:
     if value_column not in prepared.columns:
         return None
@@ -544,7 +609,47 @@ def _optional_pivot_series(
     )
     if container_type not in pivot.columns:
         return None
-    return pivot[container_type].reset_index(drop=True)
+    series = pivot[container_type]
+    if lane_index is not None:
+        series = series.reindex(lane_index)
+    return series.reset_index(drop=True)
+
+
+def _first_currency_from_group(
+    group: pd.DataFrame,
+    currency_columns: tuple[str, ...],
+) -> object:
+    for column in currency_columns:
+        if column not in group.columns:
+            continue
+        for value in group[column]:
+            if not _is_empty_rate_card_value(value):
+                return value
+    return None
+
+
+def _lane_currency_series(
+    prepared: pd.DataFrame,
+    lane_columns: list[str],
+    lane_index: pd.Index,
+    currency_columns: tuple[str, ...] = (
+        "Currency Freight Rate",
+        "THC indication Origin Currency",
+        "THC indication Destination Currency",
+    ),
+) -> pd.Series:
+    currency_by_lane: dict[tuple[object, ...], object] = {}
+    for lane_key, group in prepared.groupby(lane_columns, sort=False):
+        if not isinstance(lane_key, tuple):
+            lane_key = (lane_key,)
+        currency_by_lane[lane_key] = _first_currency_from_group(group, currency_columns)
+
+    values: list[object] = []
+    for lane_key in lane_index:
+        if not isinstance(lane_key, tuple):
+            lane_key = (lane_key,)
+        values.append(currency_by_lane.get(lane_key))
+    return pd.Series(values).reset_index(drop=True)
 
 
 def _series_has_values(series: pd.Series) -> bool:
@@ -670,6 +775,12 @@ def build_rate_card_dataframe(
     }
     shipment_df = shipment_df.rename(columns=rename_map)[list(profile.shipment_columns)].copy()
 
+    lane_currency_fallback = _lane_currency_series(
+        prepared,
+        lane_columns,
+        cost_pivot.index,
+    )
+
     transport_thc_blocks: list[pd.DataFrame] = []
     imo_blocks: list[pd.DataFrame] = []
     ets_blocks: list[pd.DataFrame] = []
@@ -687,15 +798,17 @@ def build_rate_card_dataframe(
         if use_othc_dthc_labels:
             thc_inbound_series = pd.Series([None] * len(shipment_df))
             thc_outbound_series = pd.Series([None] * len(shipment_df))
+            thc_in_lookup_currency = pd.Series([None] * len(shipment_df))
+            thc_out_lookup_currency = pd.Series([None] * len(shipment_df))
         else:
-            thc_inbound_series = _lookup_thc_series(
+            thc_inbound_series, thc_in_lookup_currency = _lookup_thc_series(
                 shipment_df,
                 container_type,
                 currency_series,
                 thc_lookup,
                 direction="inbound",
             )
-            thc_outbound_series = _lookup_thc_series(
+            thc_outbound_series, thc_out_lookup_currency = _lookup_thc_series(
                 shipment_df,
                 container_type,
                 currency_series,
@@ -731,24 +844,28 @@ def build_rate_card_dataframe(
             lane_columns,
             container_type,
             "THC indication Origin lump sum",
+            lane_index=cost_pivot.index,
         )
         thc_out_fallback = _optional_pivot_series(
             prepared,
             lane_columns,
             container_type,
             "THC indication Destination lump sum",
+            lane_index=cost_pivot.index,
         )
         thc_in_currency_fallback = _optional_pivot_series(
             prepared,
             lane_columns,
             container_type,
             "THC indication Origin Currency",
+            lane_index=cost_pivot.index,
         )
         thc_out_currency_fallback = _optional_pivot_series(
             prepared,
             lane_columns,
             container_type,
             "THC indication Destination Currency",
+            lane_index=cost_pivot.index,
         )
         thc_inbound_series = _fallback_when_empty_per_row(thc_inbound_series, thc_in_fallback)
         thc_outbound_series = _fallback_when_empty_per_row(thc_outbound_series, thc_out_fallback)
@@ -760,17 +877,29 @@ def build_rate_card_dataframe(
             thc_inbound_series = _negate_thc_cost_series(thc_inbound_series)
             thc_outbound_series = _negate_thc_cost_series(thc_outbound_series)
 
+        transport_present = ~cost_series.apply(_is_empty_rate_card_value)
+        thc_inbound_series = _mask_series_without_transport(
+            thc_inbound_series,
+            transport_present,
+        )
+        thc_outbound_series = _mask_series_without_transport(
+            thc_outbound_series,
+            transport_present,
+        )
+
         imo_cost_fallback = _optional_pivot_series(
             prepared,
             lane_columns,
             container_type,
             "IMO Charge",
+            lane_index=cost_pivot.index,
         )
         imo_currency_fallback = _optional_pivot_series(
             prepared,
             lane_columns,
             container_type,
             "Currency IMO Charge",
+            lane_index=cost_pivot.index,
         )
         imo_cost = _fallback_when_empty(imo_cost, imo_cost_fallback)
         imo_currency = _fallback_when_empty(imo_currency, imo_currency_fallback)
@@ -782,12 +911,24 @@ def build_rate_card_dataframe(
         )
 
         ets_cost_fallback = (
-            _optional_pivot_series(prepared, lane_columns, container_type, ets_value_col)
+            _optional_pivot_series(
+                prepared,
+                lane_columns,
+                container_type,
+                ets_value_col,
+                lane_index=cost_pivot.index,
+            )
             if ets_value_col
             else None
         )
         ets_currency_fallback = (
-            _optional_pivot_series(prepared, lane_columns, container_type, ets_currency_col)
+            _optional_pivot_series(
+                prepared,
+                lane_columns,
+                container_type,
+                ets_currency_col,
+                lane_index=cost_pivot.index,
+            )
             if ets_currency_col
             else None
         )
@@ -811,16 +952,30 @@ def build_rate_card_dataframe(
             wrs_cost,
             wrs_currency,
         )
-        transport_currency = _mask_currency_without_cost(currency_series, cost_series)
+        transport_currency = _resolve_transport_currency_series(
+            cost_series,
+            currency_series,
+            thc_in_currency_fallback,
+            thc_out_currency_fallback,
+            lane_currency_fallback,
+        )
         thc_in_currency = _resolve_thc_currency_series(
             thc_inbound_series,
             thc_in_currency_fallback,
             currency_series,
+            thc_in_lookup_currency,
+            thc_out_currency_fallback,
+            transport_currency,
+            lane_currency_fallback,
         )
         thc_out_currency = _resolve_thc_currency_series(
             thc_outbound_series,
             thc_out_currency_fallback,
             currency_series,
+            thc_out_lookup_currency,
+            thc_in_currency_fallback,
+            transport_currency,
+            lane_currency_fallback,
         )
         transport_thc_blocks.append(
             pd.DataFrame(
@@ -1287,7 +1442,7 @@ def _write_rate_card_sheet(
     data_start_row = profile.cost_header_rows + 1
     data_rows = list(dataframe_to_rows(rate_card_df, index=False, header=False))
     duplicate_lane_rows: list[bool] | None = None
-    if profile.flow == "FCL":
+    if profile.flow in {"FCL", "BCN"}:
         shipment_cols = list(profile.shipment_columns)
         duplicate_lane_rows = _fcl_duplicate_lane_flags(
             rate_card_df[shipment_cols],
@@ -1388,7 +1543,7 @@ def save_rate_card(
         column_groups,
         shipment_count=len(profile.shipment_columns),
     )
-    if flow == "FCL":
+    if flow in {"FCL", "BCN"}:
         rate_card_df = _merge_fcl_compatible_lanes(
             rate_card_df,
             profile.shipment_columns,
